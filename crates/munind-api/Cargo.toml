@@ -1,0 +1,15 @@
+[package]
+name = "munind-api"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+munind-core = { path = "../munind-core" }
+munind-storage = { path = "../munind-storage" }
+munind-index = { path = "../munind-index" }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.26.0"

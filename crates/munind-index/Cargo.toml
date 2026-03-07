@@ -1,0 +1,13 @@
+[package]
+name = "munind-index"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+munind-core = { path = "../munind-core" }
+rand = "0.10.0"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

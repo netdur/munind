@@ -1,0 +1,1 @@
+Munind is a high-performance vector database written in Rust. It features durable write-ahead logs and an HNSW-like graph index. We use a VP-Tree to find the optimal seed node before greedy graph traversal.

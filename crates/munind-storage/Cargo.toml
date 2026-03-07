@@ -1,0 +1,16 @@
+[package]
+name = "munind-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast = "1.5.0"
+munind-core = { path = "../munind-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3.26.0"

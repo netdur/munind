@@ -1,0 +1,14 @@
+[package]
+name = "munind-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+munind-core = { path = "../munind-core" }
+munind-api = { path = "../munind-api" }
+munind-rag = { path = "../munind-rag" }
+anyhow = "1.0"
+serde_json = "1.0"
