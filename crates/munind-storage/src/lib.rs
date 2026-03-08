@@ -1,12 +1,12 @@
-pub mod manifest;
-pub mod wal;
-pub mod segment;
 pub mod id;
+pub mod manifest;
+pub mod segment;
+pub mod wal;
 
-pub use manifest::{StorageEngine, Manifest};
-pub use wal::{WalFile, WalRecord, OpType};
-pub use segment::{VectorSegment, JsonSegment};
 pub use id::{IdAllocator, RecordLocation};
+pub use manifest::{Manifest, StorageEngine};
+pub use segment::{JsonSegment, VectorSegment};
+pub use wal::{OpType, WalFile, WalRecord};
 
 #[cfg(test)]
 mod tests {
@@ -24,7 +24,7 @@ mod tests {
 
         // 1. Create the engine
         let engine = StorageEngine::create(&path, 512, config).expect("Failed to create engine");
-        
+
         // Ensure manifest logic is sound
         assert!(path.join("MANIFEST.json").exists());
         assert!(path.join("wal").exists());
@@ -37,9 +37,11 @@ mod tests {
 
         // 2. Open the existing engine
         let opened_engine = StorageEngine::open(&path).expect("Failed to open engine");
-        
+
         // It should open successfully
-        opened_engine.close().expect("Failed to close opened engine");
+        opened_engine
+            .close()
+            .expect("Failed to close opened engine");
     }
 
     #[test]
@@ -71,16 +73,17 @@ mod tests {
         {
             let mut wal = WalFile::open(&path, false).unwrap();
             let mut replayed = Vec::new();
-            
+
             wal.replay(|rec| {
                 replayed.push(rec);
                 Ok(())
-            }).unwrap();
+            })
+            .unwrap();
 
             assert_eq!(replayed.len(), 2);
             assert_eq!(replayed[0].memory_id.0, 1);
             assert_eq!(replayed[1].memory_id.0, 2);
-            
+
             match &replayed[0].op {
                 OpType::Insert { embedding, .. } => {
                     assert_eq!(embedding.len(), 3);
@@ -93,11 +96,11 @@ mod tests {
     #[test]
     fn test_segment_append_read() {
         let dir = tempdir().unwrap();
-        
+
         let mut vec_seg = VectorSegment::open(dir.path().join("vec.seg"), 3).unwrap();
         let off1 = vec_seg.append(&[1.0, 2.0, 3.0]).unwrap();
         let off2 = vec_seg.append(&[4.0, 5.0, 6.0]).unwrap();
-        
+
         assert_eq!(vec_seg.read(off1).unwrap(), vec![1.0, 2.0, 3.0]);
         assert_eq!(vec_seg.read(off2).unwrap(), vec![4.0, 5.0, 6.0]);
 
@@ -121,7 +124,7 @@ mod tests {
         alloc.set_location(id2, 100, 200);
 
         assert_eq!(alloc.len(), 2);
-        
+
         let loc1 = alloc.get_location(id1).unwrap();
         assert_eq!(loc1.vector_offset, 10);
         assert_eq!(loc1.json_offset, 20);
@@ -134,7 +137,7 @@ mod tests {
     #[test]
     fn test_storage_engine_crash_restart() {
         use munind_core::engine::VectorEngine;
-        
+
         let dir = tempdir().unwrap();
         let path = dir.path().join("db");
         let config = EngineConfig::default();
@@ -146,21 +149,18 @@ mod tests {
         // Simulate first run
         {
             let engine = StorageEngine::create(&path, 3, config).unwrap();
-            
-            id1 = engine.insert_json(
-                vec![1.0, 1.0, 1.0], 
-                serde_json::json!({"name": "doc1"})
-            ).unwrap();
-            
-            id2 = engine.insert_json(
-                vec![2.0, 2.0, 2.0], 
-                serde_json::json!({"name": "doc2"})
-            ).unwrap();
-            
-            id3 = engine.insert_json(
-                vec![3.0, 3.0, 3.0], 
-                serde_json::json!({"name": "doc3"})
-            ).unwrap();
+
+            id1 = engine
+                .insert_json(vec![1.0, 1.0, 1.0], serde_json::json!({"name": "doc1"}))
+                .unwrap();
+
+            id2 = engine
+                .insert_json(vec![2.0, 2.0, 2.0], serde_json::json!({"name": "doc2"}))
+                .unwrap();
+
+            id3 = engine
+                .insert_json(vec![3.0, 3.0, 3.0], serde_json::json!({"name": "doc3"}))
+                .unwrap();
 
             engine.remove(id2).unwrap();
             // Engine drops here, simulating a crash (no flush/optimize graceful shutdown)

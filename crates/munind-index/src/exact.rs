@@ -1,8 +1,8 @@
-use std::collections::BinaryHeap;
-use std::cmp::Ordering;
-use munind_core::domain::MemoryId;
-use munind_core::config::DistanceMetric;
 use crate::vector::calculate_distance;
+use munind_core::config::DistanceMetric;
+use munind_core::domain::MemoryId;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScoredHit {
@@ -52,7 +52,7 @@ impl<'a> ExactSearcher<'a> {
 
     pub fn push(&mut self, id: MemoryId, vector: &[f32]) {
         let distance = calculate_distance(&self.metric, self.query, vector);
-        
+
         if self.heap.len() < self.top_k {
             self.heap.push(ScoredHit { id, distance });
         } else if let Some(max) = self.heap.peek()
@@ -66,7 +66,11 @@ impl<'a> ExactSearcher<'a> {
     pub fn take_results(self) -> Vec<ScoredHit> {
         let mut results = self.heap.into_vec();
         // Sort lowest distance first
-        results.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        results.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         results
     }
 }

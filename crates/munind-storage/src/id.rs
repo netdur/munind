@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use munind_core::domain::MemoryId;
+use std::collections::HashMap;
 
 /// In-memory tracker of record locations within segments.
 #[derive(Debug, Clone)]
@@ -46,11 +46,14 @@ impl IdAllocator {
         if id.0 >= self.next_id {
             self.next_id = id.0 + 1;
         }
-        self.locations.insert(id, RecordLocation {
-            vector_offset,
-            json_offset,
-            tombstoned: false,
-        });
+        self.locations.insert(
+            id,
+            RecordLocation {
+                vector_offset,
+                json_offset,
+                tombstoned: false,
+            },
+        );
     }
 
     /// Retrieves the location if it exists and is not tombstoned.
@@ -71,11 +74,11 @@ impl IdAllocator {
         }
         false
     }
-    
+
     pub fn len(&self) -> usize {
         self.locations.iter().filter(|(_, v)| !v.tombstoned).count()
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

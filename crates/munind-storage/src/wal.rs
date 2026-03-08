@@ -1,11 +1,10 @@
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, Seek, SeekFrom};
-use std::path::Path;
 use crc32fast::Hasher;
-use serde::{Deserialize, Serialize};
-
-use munind_core::error::{MunindError, Result};
 use munind_core::domain::MemoryId;
+use munind_core::error::{MunindError, Result};
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 pub const WAL_MAGIC: u32 = 0x4D554E41; // "MUNA"
 pub const WAL_VERSION: u16 = 1;
@@ -21,7 +20,7 @@ pub enum OpType {
         document: serde_json::Value,
     },
     Delete,
-    Config, // Reserved for future
+    Config,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,7 +41,10 @@ impl WalFile {
             .create(true)
             .append(true)
             .open(path)?;
-        Ok(Self { file, fsync_enabled })
+        Ok(Self {
+            file,
+            fsync_enabled,
+        })
     }
 
     pub fn append(&mut self, record: &WalRecord) -> Result<()> {
@@ -55,7 +57,7 @@ impl WalFile {
         let payload_len = payload.len() as u32;
         hasher.update(&payload_len.to_le_bytes());
         hasher.update(&payload);
-        
+
         let crc = hasher.finalize();
 
         let mut buffer = Vec::with_capacity(4 + 2 + 4 + payload.len() + 4);
@@ -66,7 +68,7 @@ impl WalFile {
         buffer.extend_from_slice(&crc.to_le_bytes());
 
         self.file.write_all(&buffer)?;
-        
+
         if self.fsync_enabled {
             self.file.sync_data()?;
         }
@@ -74,33 +76,52 @@ impl WalFile {
         Ok(())
     }
 
-    pub fn replay<F>(&mut self, mut callback: F) -> Result<()> 
-    where 
-        F: FnMut(WalRecord) -> Result<()>
+    pub fn flush(&mut self) -> Result<()> {
+        self.file.flush()?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    pub fn reset(&mut self) -> Result<()> {
+        self.file.set_len(0)?;
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+
+    pub fn replay<F>(&mut self, mut callback: F) -> Result<()>
+    where
+        F: FnMut(WalRecord) -> Result<()>,
     {
         self.file.seek(SeekFrom::Start(0))?;
         let mut reader = std::io::BufReader::new(&mut self.file);
 
         loop {
-            let mut header = [0u8; 10]; // 4 (magic) + 2 (version) + 4 (len)
+            let mut header = [0u8; 10];
             match reader.read_exact(&mut header) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(MunindError::Io(e)),
             }
 
-            let magic = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            let magic = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
             if magic != WAL_MAGIC {
-                return Err(MunindError::Corruption(format!("Bad WAL magic: {:x}", magic)));
+                return Err(MunindError::Corruption(format!(
+                    "Bad WAL magic: {:x}",
+                    magic
+                )));
             }
 
-            let version = u16::from_le_bytes(header[4..6].try_into().unwrap());
+            let version = u16::from_le_bytes([header[4], header[5]]);
             if version != WAL_VERSION {
-                return Err(MunindError::Corruption(format!("Unknown WAL version: {}", version)));
+                return Err(MunindError::Corruption(format!(
+                    "Unknown WAL version: {}",
+                    version
+                )));
             }
 
-            let payload_len = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
-            
+            let payload_len =
+                u32::from_le_bytes([header[6], header[7], header[8], header[9]]) as usize;
+
             let mut payload = vec![0u8; payload_len];
             reader.read_exact(&mut payload)?;
 
@@ -114,12 +135,16 @@ impl WalFile {
             let calculated_crc = hasher.finalize();
 
             if calculated_crc != expected_crc {
-                return Err(MunindError::Corruption(format!("WAL checksum mismatch: expected {:x}, got {:x}", expected_crc, calculated_crc)));
+                return Err(MunindError::Corruption(format!(
+                    "WAL checksum mismatch: expected {:x}, got {:x}",
+                    expected_crc, calculated_crc
+                )));
             }
 
-            let record: WalRecord = serde_json::from_slice(&payload)
-                .map_err(|e| MunindError::Corruption(format!("Failed to deserialize payload: {}", e)))?;
-            
+            let record: WalRecord = serde_json::from_slice(&payload).map_err(|e| {
+                MunindError::Corruption(format!("Failed to deserialize payload: {}", e))
+            })?;
+
             callback(record)?;
         }
 

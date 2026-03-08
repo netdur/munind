@@ -4,11 +4,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemoryId(pub u64);
 
-/// Request parameters for a search operation
+/// Request parameters for a search operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub vector: Vec<f32>,
     pub top_k: usize,
+    /// Optional lexical query used for hybrid search (BM25F + vector fusion).
+    pub text_query: Option<String>,
+    /// Optional hybrid weight in [0,1]. 1.0 means vector-only, 0.0 means lexical-only.
+    pub hybrid_alpha: Option<f32>,
+    /// Optional lexical candidate count for BM25F retrieval before fusion.
+    pub lexical_top_k: Option<usize>,
     /// Additional search filters, e.g. exact JSON equality filters depending on the engine's capabilities.
     pub filter: Option<FilterExpression>,
     pub ef_search: Option<usize>,
@@ -28,7 +34,7 @@ pub enum FilterExpression {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub id: MemoryId,
-    pub score: f32, // Distance/Similarity
+    pub score: f32, // Distance/Similarity or fused relevance
     pub document: serde_json::Value,
 }
 
