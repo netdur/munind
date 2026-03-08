@@ -1,6 +1,6 @@
 # Munind Vector DB Plan
 
-This folder contains a full implementation plan for building a Rust vector database for personal memory RAG.
+This folder contains a full implementation plan for building a Rust local-only, general-purpose vector database.
 
 Reference base:
 - Use `vendor/NGT/lib/NGT` as the design reference.
@@ -17,19 +17,21 @@ Design direction:
 4. `03-architecture.md`
 5. `04-storage-and-durability.md`
 6. `05-indexing-and-search.md`
-7. `06-rag-memory-features.md`
+7. `06-application-retrieval-features.md`
 8. `07-api-cli-and-observability.md`
 9. `08-testing-benchmarking-release.md`
 10. `09-implementation-roadmap.md`
 
 ## End State
 By the end of this plan, the project should provide:
-- Persistent local-only memory store for embeddings + JSON documents.
+- Persistent local-only store for embeddings + JSON documents.
 - Desktop/mobile oriented architecture (single-device focus).
 - High recall approximate nearest-neighbor search with low-latency reads.
-- Hybrid retrieval for RAG (vector + filters + optional lexical/rerank).
+- Hybrid retrieval (vector + filters + optional lexical/rerank).
 - Durable write path with WAL + snapshot + recovery.
 - Production-quality CI, benchmarking, and observability.
+
+Use cases include personal memory retrieval and local RAG context retrieval.
 
 ## Scope Notes
 - Quantization research can be added later, but initial core should ship without NGTQ dependencies.

@@ -24,7 +24,7 @@
 Scenarios:
 - synthetic random vectors
 - public ANN-style datasets (local fixtures)
-- personal-memory-like corpus with metadata filters
+- domain-like corpus with metadata filters (for example: personal notes/messages)
 
 Measure:
 - p50/p95/p99 search latency

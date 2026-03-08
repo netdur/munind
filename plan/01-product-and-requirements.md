@@ -1,7 +1,7 @@
 # 01 - Product And Requirements
 
 ## Product Goal
-Build a personal memory database in Rust that stores embedded memories and retrieves the best context for RAG quickly and reliably.
+Build a local-only, general-purpose vector database in Rust that stores embeddings with JSON documents and retrieves relevant results quickly and reliably.
 
 ## Platform Priority
 - Desktop integration first.
@@ -9,9 +9,9 @@ Build a personal memory database in Rust that stores embedded memories and retri
 
 ## Primary Use Cases
 - Insert a record as `embedding + JSON document`.
-- Search memories by semantic similarity with metadata filters.
-- Build RAG context windows from top-k JSON search results.
-- Update or delete memories cleanly.
+- Search documents by semantic similarity with metadata filters.
+- Build context windows for downstream applications (including RAG) from top-k JSON search results.
+- Update or delete records cleanly.
 - Rebuild or optimize the index without data loss.
 
 ## Non-Goals (Phase 1)
@@ -23,7 +23,7 @@ Build a personal memory database in Rust that stores embedded memories and retri
 - Full NGTQ/QBG style quantized systems.
 
 ## Workload Assumptions
-- Data scale: 100k to 20M memory chunks over time.
+- Data scale: 100k to 20M documents/chunks over time.
 - Embedding dimension is selected at database creation and fixed for that database.
 - Default first profile dimension: `512`.
 - Typical dimension choices over time: 384 / 512 / 768 / 1024 / 1536.
@@ -70,11 +70,13 @@ Record shape:
 - `RangeSearch`: vector + radius + max_results.
 - `HybridSearch`: vector search + lexical stage + rerank stage.
 
-## Ranking Model For Personal Memories
+## Ranking Model For Application Signals
 Composite score example:
 - `final = alpha * semantic + beta * recency + gamma * importance`
 - recency decay configurable by half-life.
-- important memories can survive recency decay.
+- explicit importance boosts can be enabled by applications.
+
+This model is especially useful for personal-memory style applications, but remains optional at DB core level.
 
 ## Security/Privacy Requirements
 - Local-only defaults.

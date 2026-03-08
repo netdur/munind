@@ -36,14 +36,14 @@ Deliverables:
 Exit criteria:
 - recall@10 and p95 latency hit target envelope.
 
-## Phase 4 - RAG Layer (Weeks 9-10)
+## Phase 4 - Retrieval Quality Layer (Weeks 9-10)
 Deliverables:
 - metadata filtering
 - hybrid retrieval hooks
 - context assembly and scoring policy
 
 Exit criteria:
-- end-to-end RAG memory retrieval demo is stable.
+- end-to-end retrieval demos for key use cases are stable (including personal memory and local RAG).
 
 ## Phase 5 - API/CLI And Desktop Integration (Weeks 11-12)
 Deliverables:

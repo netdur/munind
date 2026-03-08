@@ -5,7 +5,7 @@ Recommended Rust workspace:
 - `crates/munind-core`: domain types, traits, configs, errors.
 - `crates/munind-storage`: WAL, segments, snapshots, mmap helpers.
 - `crates/munind-index`: graph index, optional tree seed index, search.
-- `crates/munind-rag`: retrieval pipeline, reranking, context assembly.
+- `crates/munind-rag`: optional ingestion/retrieval pipeline, reranking, context assembly helpers.
 - `crates/munind-cli`: command line tools.
 - `crates/munind-local-api` (optional): local adapter layer for desktop/mobile integration (desktop prioritized first).
 - `crates/munind-bench`: benchmark harness + recall tooling.
@@ -41,7 +41,7 @@ pub trait VectorEngine {
   - optional re-embedding queue for model upgrades
 
 ## ID And Versioning Strategy
-- `MemoryId`: monotonic `u64` allocator.
+- Stable record ID allocator (`MemoryId` type alias in current code).
 - `RecordVersion`: increment per update.
 - Tombstones for delete; physical cleanup on compaction.
 

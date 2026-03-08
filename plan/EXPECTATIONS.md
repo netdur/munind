@@ -5,7 +5,7 @@ This file defines what the project should deliver at the end and is the shared s
 
 ## Final Outcome (What You Will Get)
 At project completion, you should have:
-- A Rust vector database for personal memory RAG.
+- A Rust local-only, general-purpose vector database.
 - A local-only engine (single device), with no cloud scaling objective.
 - A product shape that fits desktop and mobile usage better than server deployment.
 - Persistent storage for embeddings and JSON documents.
@@ -17,6 +17,8 @@ At project completion, you should have:
 - CLI for common operations and maintenance.
 - Benchmark and test coverage with measurable recall/latency baselines.
 - Documentation/runbooks sufficient to operate and evolve the system.
+
+Primary use cases include personal memory retrieval and local RAG context retrieval.
 
 ## Out Of Scope For Initial Delivery
 - Distributed cluster mode.

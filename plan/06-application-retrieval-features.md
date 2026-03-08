@@ -1,20 +1,20 @@
-# 06 - RAG Memory Features
+# 06 - Application Retrieval Features
 
-## Memory Ingestion Pipeline
-1. Normalize raw note/message/document.
+## Document Ingestion Pipeline
+1. Normalize raw input document/message/content.
 2. Chunk content (semantic or token-window chunker).
 3. Generate embeddings via configured model/provider.
 4. Attach metadata and scoring hints.
 5. Persist and index.
 
-## Memory Record Types
+## Example Record Types (Use-Case Driven)
 - `note`
 - `conversation_turn`
 - `document_chunk`
 - `task`
 - `event`
 
-Type affects defaults for:
+Type can influence defaults for:
 - chunking policy
 - recency decay
 - importance priors
@@ -30,7 +30,7 @@ Type affects defaults for:
 - `language`
 - `privacy_level`
 
-## Retrieval Pipeline For RAG
+## Retrieval Pipeline (RAG-Compatible)
 1. Embed query.
 2. ANN retrieve top `N1` with filters.
 3. Optional lexical pass for keyword-sensitive queries.
@@ -68,3 +68,8 @@ Keep scoring pluggable so behavior can evolve without storage migration.
 - Selective field encryption.
 - Per-record access policy tags.
 - Secure erase path during compaction for deleted sensitive JSON documents.
+
+## Example Use Cases
+- Personal memory retrieval.
+- RAG context retrieval for local assistants.
+- Semantic retrieval over local documents/messages.
