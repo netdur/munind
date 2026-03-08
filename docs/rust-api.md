@@ -15,7 +15,7 @@ use munind_core::config::EngineConfig;
 let config = EngineConfig::default();
 let engine = MunindEngine::create("./my_vectors", 512, config.clone())?;
 // Later:
-let reopened = MunindEngine::open("./my_vectors", config)?;
+let reopened = MunindEngine::open("./my_vectors")?;
 ```
 
 ## Insert Embedding + JSON
@@ -89,6 +89,23 @@ let hits = engine.search(SearchRequest {
 })?;
 ```
 
+
+## Lexical-Only Search
+
+Set `text_query` and pass an empty `vector`:
+
+```rust
+let hits = engine.search(SearchRequest {
+    vector: Vec::new(),
+    top_k: 10,
+    text_query: Some("sleep quality".into()),
+    hybrid_alpha: Some(0.0),
+    lexical_top_k: Some(200),
+    filter: None,
+    ef_search: None,
+    radius: None,
+})?;
+```
 ## Delete and Optimize
 
 ```rust

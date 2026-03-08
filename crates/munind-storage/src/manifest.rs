@@ -18,6 +18,15 @@ pub struct Manifest {
     pub config: EngineConfig,
 }
 
+const CHECKPOINT_FILE: &str = "snapshots/state-checkpoint.json";
+const CHECKPOINT_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StorageCheckpoint {
+    version: u32,
+    id_allocator: IdAllocator,
+}
+
 /// Core engine orchestrating durable storage.
 pub struct StorageEngine {
     data_dir: PathBuf,
@@ -82,6 +91,41 @@ impl StorageEngine {
         })
     }
 
+    fn checkpoint_path(dir: &Path) -> PathBuf {
+        dir.join(CHECKPOINT_FILE)
+    }
+
+    fn load_checkpoint(dir: &Path) -> Result<Option<IdAllocator>> {
+        let path = Self::checkpoint_path(dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let checkpoint: StorageCheckpoint = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        if checkpoint.version != CHECKPOINT_VERSION {
+            return Err(MunindError::Corruption(format!(
+                "Unsupported checkpoint version: {}",
+                checkpoint.version
+            )));
+        }
+
+        Ok(Some(checkpoint.id_allocator))
+    }
+
+    fn write_checkpoint_atomic(dir: &Path, id_allocator: &IdAllocator) -> Result<()> {
+        let checkpoint = StorageCheckpoint {
+            version: CHECKPOINT_VERSION,
+            id_allocator: id_allocator.clone(),
+        };
+
+        let checkpoint_path = Self::checkpoint_path(dir);
+        let checkpoint_tmp = checkpoint_path.with_extension("tmp");
+
+        fs::write(&checkpoint_tmp, serde_json::to_vec_pretty(&checkpoint)?)?;
+        fs::rename(&checkpoint_tmp, &checkpoint_path)?;
+        Ok(())
+    }
+
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let dir = path.as_ref();
         let manifest_path = dir.join("MANIFEST.json");
@@ -104,13 +148,15 @@ impl StorageEngine {
             manifest.embedding_dimension,
         )?;
         let mut json_seg = JsonSegment::open(dir.join("segments/docs-000001.seg"))?;
-        let mut id_alloc = IdAllocator::new();
+        let checkpoint_alloc = Self::load_checkpoint(dir)?;
+        let mut id_alloc = checkpoint_alloc.clone().unwrap_or_default();
 
-        // Rebuild segments + in-memory state from WAL to avoid replay-appending
-        // into previously materialized segments on each open.
-        vec_seg.reset()?;
-        json_seg.reset()?;
-
+        // If no checkpoint exists, rebuild materialized segments from scratch by replaying WAL.
+        // If a checkpoint exists, keep segments as-is and replay only WAL tail since checkpoint.
+        if checkpoint_alloc.is_none() {
+            vec_seg.reset()?;
+            json_seg.reset()?;
+        }
         wal.replay(|record| {
             match record.op {
                 OpType::Insert {
@@ -345,24 +391,25 @@ impl VectorEngine for StorageEngine {
         let mut json_seg = self.json_lock()?;
         let mut alloc = self.id_write()?;
 
-        wal.reset()?;
         vec_seg.reset()?;
         json_seg.reset()?;
-        *alloc = IdAllocator::new();
 
+        let mut compacted_alloc = IdAllocator::new();
         for (id, embedding, document) in rows.iter() {
-            wal.append(&WalRecord {
-                op: OpType::Insert {
-                    embedding: embedding.clone(),
-                    document: document.clone(),
-                },
-                memory_id: *id,
-            })?;
-
             let v_off = vec_seg.append(embedding)?;
             let j_off = json_seg.append(document)?;
-            alloc.set_location(*id, v_off, j_off);
+            compacted_alloc.set_location(*id, v_off, j_off);
         }
+
+        *alloc = compacted_alloc.clone();
+
+        // Persist compacted segments + allocator checkpoint before WAL truncation.
+        vec_seg.flush()?;
+        json_seg.flush()?;
+        Self::write_checkpoint_atomic(&self.data_dir, &compacted_alloc)?;
+
+        // WAL now only needs to contain post-checkpoint mutations.
+        wal.reset()?;
 
         drop(alloc);
         drop(json_seg);

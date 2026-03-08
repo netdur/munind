@@ -1,8 +1,9 @@
 use munind_core::domain::MemoryId;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// In-memory tracker of record locations within segments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordLocation {
     pub vector_offset: u64,
     pub json_offset: u64,
@@ -10,6 +11,7 @@ pub struct RecordLocation {
 }
 
 /// Allocates IDs and tracks segment locations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdAllocator {
     next_id: u64,
     locations: HashMap<MemoryId, RecordLocation>,

@@ -218,6 +218,58 @@ mod tests {
     }
 
     #[test]
+    fn test_optimize_writes_checkpoint_and_truncates_wal() {
+        use munind_core::domain::OptimizeRequest;
+        use munind_core::engine::VectorEngine;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let config = EngineConfig::default();
+
+        let id1;
+        let id2;
+        let id3;
+
+        {
+            let engine = StorageEngine::create(&path, 3, config).unwrap();
+            id1 = engine
+                .insert_json(vec![1.0, 0.0, 0.0], serde_json::json!({"name": "doc1"}))
+                .unwrap();
+            id2 = engine
+                .insert_json(vec![0.0, 1.0, 0.0], serde_json::json!({"name": "doc2"}))
+                .unwrap();
+            engine.remove(id2).unwrap();
+
+            let report = engine
+                .optimize(OptimizeRequest {
+                    force_full_compaction: true,
+                    repair_graph: false,
+                })
+                .unwrap();
+            assert_eq!(report.records_compacted, 1);
+
+            assert!(path.join("snapshots/state-checkpoint.json").exists());
+            assert_eq!(fs::metadata(path.join("wal/000001.wal")).unwrap().len(), 0);
+
+            id3 = engine
+                .insert_json(vec![0.0, 0.0, 1.0], serde_json::json!({"name": "doc3"}))
+                .unwrap();
+        }
+
+        let wal_len_after_new_write = fs::metadata(path.join("wal/000001.wal")).unwrap().len();
+        assert!(wal_len_after_new_write > 0);
+
+        let reopened = StorageEngine::open(&path).unwrap();
+        let alloc = reopened.id_alloc.read().unwrap();
+        assert_eq!(alloc.len(), 2);
+        assert!(alloc.get_location(id1).is_some());
+        assert!(alloc.get_location(id3).is_some());
+        drop(alloc);
+
+        let doc3 = reopened.get_document(id3).unwrap().unwrap();
+        assert_eq!(doc3["name"], serde_json::json!("doc3"));
+    }
+    #[test]
     fn test_remove_missing_returns_not_found() {
         use munind_core::engine::VectorEngine;
         use munind_core::error::MunindError;

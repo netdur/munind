@@ -7,6 +7,7 @@ pub struct MemoryId(pub u64);
 /// Request parameters for a search operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchRequest {
+    // Vector query. May be empty for lexical-only search when `text_query` is non-empty.
     pub vector: Vec<f32>,
     pub top_k: usize,
     /// Optional lexical query used for hybrid search (BM25F + vector fusion).

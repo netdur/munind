@@ -510,12 +510,47 @@ impl<E: EmbeddingProvider> RagPipeline<E> {
     }
 
     /// Ingests a raw string document, chunks it, embeds it, and stores it in the database.
+    /// `source` is persisted at both top-level (`source`) and nested (`metadata.source`) fields.
     pub fn ingest_document(
         &self,
         doc_id: &str,
-        metadata: &str,
+        source: &str,
         content: &str,
     ) -> Result<Vec<MemoryId>> {
+        self.ingest_document_with_metadata(
+            doc_id,
+            json!({
+                "doc_id": doc_id,
+                "source": source,
+                "type": "document_chunk",
+            }),
+            content,
+        )
+    }
+
+    /// Ingests a raw document with structured metadata.
+    ///
+    /// `metadata` must be a JSON object. Recognized metadata keys are mirrored to top-level
+    /// fields for payload-index compatibility (`source`, `type`, `created_at`, `tags`, `session_id`).
+    pub fn ingest_document_with_metadata(
+        &self,
+        doc_id: &str,
+        metadata: Value,
+        content: &str,
+    ) -> Result<Vec<MemoryId>> {
+        let Some(mut metadata_obj) = metadata.as_object().cloned() else {
+            return Err(MunindError::InvalidConfig(
+                "ingest_document metadata must be a JSON object".to_string(),
+            ));
+        };
+
+        metadata_obj
+            .entry("doc_id".to_string())
+            .or_insert_with(|| Value::String(doc_id.to_string()));
+        metadata_obj
+            .entry("type".to_string())
+            .or_insert_with(|| Value::String("document_chunk".to_string()));
+
         let chunks = self.splitter.split_text(content);
         if chunks.is_empty() {
             return Ok(Vec::new());
@@ -533,13 +568,22 @@ impl<E: EmbeddingProvider> RagPipeline<E> {
 
         let mut batch = Vec::with_capacity(chunks.len());
         for (i, (chunk, emb)) in chunks.into_iter().zip(embeddings).enumerate() {
-            let doc = json!({
+            let mut doc = json!({
                 "doc_id": doc_id,
-                "metadata": metadata,
+                "metadata": Value::Object(metadata_obj.clone()),
                 "chunk_idx": i,
                 "text": chunk,
                 "embedding_model_id": self.embedder.model_id(),
             });
+
+            if let Some(doc_obj) = doc.as_object_mut() {
+                for key in ["source", "type", "created_at", "tags", "session_id"] {
+                    if let Some(value) = metadata_obj.get(key) {
+                        doc_obj.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
+
             batch.push((emb, doc));
         }
 
@@ -755,7 +799,7 @@ mod tests {
     use super::{DeterministicEmbedder, DeterministicReranker, EmbeddingProvider, RagPipeline};
     use munind_api::MunindEngine;
     use munind_core::config::EngineConfig;
-    use munind_core::domain::SearchRequest;
+    use munind_core::domain::{FilterExpression, SearchRequest};
     use munind_core::engine::VectorEngine;
     use serde_json::json;
     use tempfile::tempdir;
@@ -775,6 +819,52 @@ mod tests {
         let hits = rag.search("hello world", 3).unwrap();
         assert!(!hits.is_empty());
         assert_eq!(hits[0].document["embedding_model_id"], "deterministic-v1");
+    }
+
+    #[test]
+    fn test_ingest_document_writes_structured_metadata_for_indexes() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let engine = MunindEngine::create(&db_path, 8, EngineConfig::default()).unwrap();
+
+        let embedder = DeterministicEmbedder::default();
+        let query_vec = embedder
+            .embed_batch(&["hello world".to_string()], 8)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        let rag = RagPipeline::new(engine, embedder);
+        let ids = rag
+            .ingest_document("doc-1", "cli-ingest", "hello world. this is a test.")
+            .unwrap();
+        assert!(!ids.is_empty());
+
+        let filtered = rag
+            .engine
+            .search(SearchRequest {
+                vector: query_vec,
+                top_k: 10,
+                text_query: None,
+                hybrid_alpha: None,
+                lexical_top_k: None,
+                filter: Some(FilterExpression::Eq(
+                    "metadata.source".to_string(),
+                    json!("cli-ingest"),
+                )),
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap();
+
+        assert!(!filtered.is_empty());
+        for hit in filtered {
+            assert!(hit.document["metadata"].is_object());
+            assert_eq!(hit.document["metadata"]["doc_id"], json!("doc-1"));
+            assert_eq!(hit.document["metadata"]["source"], json!("cli-ingest"));
+            assert_eq!(hit.document["source"], json!("cli-ingest"));
+        }
     }
 
     #[test]

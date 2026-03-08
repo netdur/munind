@@ -74,6 +74,12 @@ pub struct MunindEngine {
     payload: RwLock<PayloadIndex>,
 }
 
+struct IndexWriteTxn<'a> {
+    index: RwLockWriteGuard<'a, IndexEngine>,
+    lexical: RwLockWriteGuard<'a, LexicalIndex>,
+    payload: RwLockWriteGuard<'a, PayloadIndex>,
+}
+
 impl MunindEngine {
     /// Creates a new database with an immutable embedding dimension.
     pub fn create<P: AsRef<Path>>(
@@ -118,7 +124,7 @@ impl MunindEngine {
     }
 
     /// Opens an existing database.
-    pub fn open<P: AsRef<Path>>(data_dir: P, config: EngineConfig) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
         let path = data_dir.as_ref().to_path_buf();
 
         let manifest_path = path.join("MANIFEST.json");
@@ -130,6 +136,7 @@ impl MunindEngine {
         }
 
         let storage = StorageEngine::open(&path)?;
+        let config = storage.manifest.config.clone();
         let (index, lexical, payload) = Self::build_indexes_from_storage(&storage, &config)?;
 
         Ok(Self {
@@ -181,6 +188,19 @@ impl MunindEngine {
             .map_err(|_| MunindError::Internal("payload write lock poisoned".to_string()))
     }
 
+    fn indexes_write(&self) -> Result<IndexWriteTxn<'_>> {
+        // Acquire all mutable index guards in a fixed order so writes become
+        // process-visible as a single unit and to avoid deadlocks among writers.
+        let index = self.index_write()?;
+        let lexical = self.lexical_write()?;
+        let payload = self.payload_write()?;
+        Ok(IndexWriteTxn {
+            index,
+            lexical,
+            payload,
+        })
+    }
+
     fn rebuild_indexes_from_storage(&self) -> Result<(IndexEngine, LexicalIndex, PayloadIndex)> {
         Self::build_indexes_from_storage(&self.storage, &self.config)
     }
@@ -195,18 +215,15 @@ impl VectorEngine for MunindEngine {
 
     fn insert_json(&self, embedding: Vec<f32>, document: Value) -> Result<MemoryId> {
         let doc_for_indexes = document.clone();
+
+        // Hold all index write locks first so a durable insert cannot be observed
+        // with partially updated in-memory indexes.
+        let mut indexes = self.indexes_write()?;
+
         let id = self.storage.insert_json(embedding.clone(), document)?;
-
-        let mut idx = self.index_write()?;
-        idx.insert(id, embedding);
-        drop(idx);
-
-        let mut lexical = self.lexical_write()?;
-        lexical.insert(id, &doc_for_indexes);
-        drop(lexical);
-
-        let mut payload = self.payload_write()?;
-        payload.insert(id, &doc_for_indexes);
+        indexes.index.insert(id, embedding);
+        indexes.lexical.insert(id, &doc_for_indexes);
+        indexes.payload.insert(id, &doc_for_indexes);
 
         Ok(id)
     }
@@ -223,11 +240,26 @@ impl VectorEngine for MunindEngine {
         if req.top_k == 0 {
             return Ok(Vec::new());
         }
-        if req.vector.len() != self.embedding_dimension() {
+
+        let hybrid_query = req
+            .text_query
+            .as_ref()
+            .map(|q| q.trim())
+            .filter(|q| !q.is_empty());
+        let hybrid_enabled = hybrid_query.is_some();
+        let lexical_only = req.vector.is_empty() && hybrid_enabled;
+
+        if !lexical_only && req.vector.len() != self.embedding_dimension() {
             return Err(MunindError::DimensionMismatch {
                 expected: self.embedding_dimension(),
                 actual: req.vector.len(),
             });
+        }
+
+        if lexical_only && req.radius.is_some() {
+            return Err(MunindError::InvalidConfig(
+                "radius filtering requires a non-empty vector query".to_string(),
+            ));
         }
 
         let filter_plan: Option<PayloadFilterPlan> = if let Some(filter) = req.filter.as_ref() {
@@ -249,53 +281,56 @@ impl VectorEngine for MunindEngine {
             .map(|p| p.fully_indexed)
             .unwrap_or(false);
 
-        let hybrid_query = req
-            .text_query
-            .as_ref()
-            .map(|q| q.trim())
-            .filter(|q| !q.is_empty());
-        let hybrid_enabled = hybrid_query.is_some();
-
-        let idx = self.index_read()?;
-        let ef = req.ef_search.unwrap_or_else(|| idx.default_ef_search());
-        let indexed_count = idx.vector_count();
-
-        let needs_broad_candidates = req.filter.is_some() || req.radius.is_some() || hybrid_enabled;
-        let mut candidate_k = if needs_broad_candidates {
-            req.top_k
-                .saturating_mul(20)
-                .max(req.top_k)
-                .min(indexed_count.max(req.top_k))
-        } else {
-            req.top_k
-        };
-
-        if let Some(ids) = filter_candidate_ids {
-            candidate_k = candidate_k.min(ids.len().max(req.top_k));
-        }
-
-        let raw_results = if let Some(ids) = filter_candidate_ids {
-            if ids.len() <= FILTERED_EXACT_SCAN_THRESHOLD {
-                idx.exact_search_filtered(&req.vector, ids, candidate_k.max(req.top_k))
-            } else {
-                idx.search_with_ef(&req.vector, candidate_k.max(req.top_k), ef)
-                    .into_iter()
-                    .filter(|hit| ids.contains(&hit.id))
-                    .collect()
-            }
-        } else {
-            idx.search_with_ef(&req.vector, candidate_k, ef)
-        };
-        drop(idx);
-
+        let mut candidate_k: usize;
         let mut vector_distances: HashMap<MemoryId, f32> = HashMap::new();
         let mut vector_scores: HashMap<MemoryId, f32> = HashMap::new();
-        for hit in raw_results {
-            vector_distances.insert(hit.id, hit.distance);
-            vector_scores.insert(
-                hit.id,
-                distance_to_score(&self.config.index.metric, hit.distance),
-            );
+
+        if lexical_only {
+            candidate_k = req.lexical_top_k.unwrap_or(req.top_k).max(req.top_k);
+            if let Some(ids) = filter_candidate_ids {
+                candidate_k = candidate_k.min(ids.len().max(req.top_k));
+            }
+        } else {
+            let idx = self.index_read()?;
+            let ef = req.ef_search.unwrap_or_else(|| idx.default_ef_search());
+            let indexed_count = idx.vector_count();
+
+            let needs_broad_candidates =
+                req.filter.is_some() || req.radius.is_some() || hybrid_enabled;
+            candidate_k = if needs_broad_candidates {
+                req.top_k
+                    .saturating_mul(20)
+                    .max(req.top_k)
+                    .min(indexed_count.max(req.top_k))
+            } else {
+                req.top_k
+            };
+
+            if let Some(ids) = filter_candidate_ids {
+                candidate_k = candidate_k.min(ids.len().max(req.top_k));
+            }
+
+            let raw_results = if let Some(ids) = filter_candidate_ids {
+                if ids.len() <= FILTERED_EXACT_SCAN_THRESHOLD {
+                    idx.exact_search_filtered(&req.vector, ids, candidate_k.max(req.top_k))
+                } else {
+                    idx.search_with_ef(&req.vector, candidate_k.max(req.top_k), ef)
+                        .into_iter()
+                        .filter(|hit| ids.contains(&hit.id))
+                        .collect()
+                }
+            } else {
+                idx.search_with_ef(&req.vector, candidate_k, ef)
+            };
+            drop(idx);
+
+            for hit in raw_results {
+                vector_distances.insert(hit.id, hit.distance);
+                vector_scores.insert(
+                    hit.id,
+                    distance_to_score(&self.config.index.metric, hit.distance),
+                );
+            }
         }
 
         let mut lexical_scores: HashMap<MemoryId, f32> = HashMap::new();
@@ -314,7 +349,11 @@ impl VectorEngine for MunindEngine {
             }
         }
 
-        let alpha = req.hybrid_alpha.unwrap_or(0.65).clamp(0.0, 1.0);
+        let alpha = if lexical_only {
+            0.0
+        } else {
+            req.hybrid_alpha.unwrap_or(0.65).clamp(0.0, 1.0)
+        };
         let vector_norm = if hybrid_enabled {
             normalize_scores(&vector_scores)
         } else {
@@ -388,18 +427,15 @@ impl VectorEngine for MunindEngine {
     }
 
     fn remove(&self, id: MemoryId) -> Result<()> {
+        // Hold all index write locks first so a durable delete cannot be observed
+        // with partially updated in-memory indexes.
+        let mut indexes = self.indexes_write()?;
+
         self.storage.remove(id)?;
 
-        let mut idx = self.index_write()?;
-        idx.delete(id);
-        drop(idx);
-
-        let mut lexical = self.lexical_write()?;
-        lexical.remove(id);
-        drop(lexical);
-
-        let mut payload = self.payload_write()?;
-        payload.remove(id);
+        indexes.index.delete(id);
+        indexes.lexical.remove(id);
+        indexes.payload.remove(id);
 
         Ok(())
     }
@@ -417,16 +453,10 @@ impl VectorEngine for MunindEngine {
         let (new_index, new_lexical, new_payload) = self.rebuild_indexes_from_storage()?;
         let rebuilt_records = new_index.vector_count();
 
-        let mut idx = self.index_write()?;
-        *idx = new_index;
-        drop(idx);
-
-        let mut lexical = self.lexical_write()?;
-        *lexical = new_lexical;
-        drop(lexical);
-
-        let mut payload = self.payload_write()?;
-        *payload = new_payload;
+        let mut indexes = self.indexes_write()?;
+        *indexes.index = new_index;
+        *indexes.lexical = new_lexical;
+        *indexes.payload = new_payload;
 
         Ok(OptimizeReport {
             records_compacted: if req.force_full_compaction {
@@ -447,6 +477,7 @@ mod tests {
     use munind_core::domain::{FilterExpression, MemoryId, OptimizeRequest, SearchRequest};
     use munind_core::engine::VectorEngine;
     use munind_core::error::MunindError;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use tempfile::tempdir;
 
     #[test]
@@ -459,17 +490,42 @@ mod tests {
         assert_eq!(engine.embedding_dimension(), 8);
         drop(engine);
 
-        let opened = MunindEngine::open(&db_path, cfg).unwrap();
+        let opened = MunindEngine::open(&db_path).unwrap();
         assert_eq!(opened.embedding_dimension(), 8);
+    }
+
+    #[test]
+    fn test_open_uses_manifest_config_for_index_behavior() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+
+        let mut cfg = EngineConfig::default();
+        cfg.index.metric = DistanceMetric::L2;
+        cfg.index.m = 24;
+        cfg.index.m0 = 48;
+        cfg.index.ef_construction = 321;
+        cfg.index.ef_search = 123;
+
+        let engine = MunindEngine::create(&db_path, 3, cfg.clone()).unwrap();
+        drop(engine);
+
+        let opened = MunindEngine::open(&db_path).unwrap();
+        assert!(matches!(opened.config.index.metric, DistanceMetric::L2));
+        assert_eq!(opened.config.index.m, 24);
+        assert_eq!(opened.config.index.m0, 48);
+        assert_eq!(opened.config.index.ef_construction, 321);
+        assert_eq!(opened.config.index.ef_search, 123);
+
+        let idx = opened.index_read().unwrap();
+        assert_eq!(idx.default_ef_search(), 123);
     }
 
     #[test]
     fn test_open_missing_database_fails() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("missing-db");
-        let cfg = EngineConfig::default();
 
-        match MunindEngine::open(&db_path, cfg) {
+        match MunindEngine::open(&db_path) {
             Err(MunindError::Io(io_err)) => {
                 assert_eq!(io_err.kind(), std::io::ErrorKind::NotFound)
             }
@@ -497,6 +553,59 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_insert_does_not_persist_when_index_lock_poisoned() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let cfg = EngineConfig::default();
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+
+        let poison = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = engine.lexical.write().unwrap();
+            panic!("poison lexical write lock");
+        }));
+        assert!(poison.is_err());
+
+        let err = engine
+            .insert_json(vec![0.1, 0.2, 0.3], serde_json::json!({"doc_id": "x"}))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MunindError::Internal(msg) if msg.contains("lexical write lock poisoned")
+        ));
+
+        let ids = engine.storage.get_all_ids().unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_remove_does_not_persist_when_index_lock_poisoned() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let cfg = EngineConfig::default();
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+
+        let id = engine
+            .insert_json(
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"doc_id": "keep", "source": "desk"}),
+            )
+            .unwrap();
+
+        let poison = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = engine.payload.write().unwrap();
+            panic!("poison payload write lock");
+        }));
+        assert!(poison.is_err());
+
+        let err = engine.remove(id).unwrap_err();
+        assert!(matches!(
+            err,
+            MunindError::Internal(msg) if msg.contains("payload write lock poisoned")
+        ));
+
+        assert!(engine.storage.get_document(id).unwrap().is_some());
+    }
     #[test]
     fn test_remove_removes_from_search_results() {
         let dir = tempdir().unwrap();
@@ -741,6 +850,68 @@ mod tests {
         assert_eq!(hybrid[0].id, id_lexical);
     }
 
+    #[test]
+    fn test_lexical_only_search_allows_empty_vector() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let mut cfg = EngineConfig::default();
+        cfg.index.metric = DistanceMetric::Cosine;
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+
+        engine
+            .insert_json(
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"title": "orange guide", "text": "citrus notes"}),
+            )
+            .unwrap();
+        engine
+            .insert_json(
+                vec![0.0, 1.0, 0.0],
+                serde_json::json!({"title": "apple guide", "text": "orchard notes"}),
+            )
+            .unwrap();
+
+        let hits = engine
+            .search(SearchRequest {
+                vector: Vec::new(),
+                top_k: 1,
+                text_query: Some("apple".to_string()),
+                hybrid_alpha: Some(0.0),
+                lexical_top_k: Some(10),
+                filter: None,
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document["title"], serde_json::json!("apple guide"));
+    }
+
+    #[test]
+    fn test_lexical_only_search_rejects_radius() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let engine = MunindEngine::create(&db_path, 3, EngineConfig::default()).unwrap();
+
+        let err = engine
+            .search(SearchRequest {
+                vector: Vec::new(),
+                top_k: 1,
+                text_query: Some("apple".to_string()),
+                hybrid_alpha: Some(0.0),
+                lexical_top_k: None,
+                filter: None,
+                ef_search: None,
+                radius: Some(1.0),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MunindError::InvalidConfig(msg) if msg.contains("radius filtering requires")
+        ));
+    }
     #[test]
     fn test_payload_indexed_doc_id_filter() {
         let dir = tempdir().unwrap();

@@ -3,7 +3,7 @@
 ## Request Model
 
 Search is driven by `SearchRequest`:
-- `vector: Vec<f32>`
+- `vector: Vec<f32>` (may be empty for lexical-only mode when `text_query` is set)
 - `top_k: usize`
 - `text_query: Option<String>`
 - `hybrid_alpha: Option<f32>`
@@ -37,13 +37,21 @@ Examples:
 
 ### 3) Hybrid Search (Vector + BM25F)
 
-Enabled when `text_query` is non-empty.
+Enabled when `text_query` is non-empty and `vector` is non-empty.
 
 - Vector candidates scored by metric-derived score.
 - Lexical candidates scored by BM25F.
 - Scores are min-max normalized and fused:
   - `fused = alpha * vector + (1 - alpha) * lexical`
 - `alpha` defaults to `0.65` when omitted.
+
+### 4) Lexical-Only Search (BM25F)
+
+Enabled when `text_query` is non-empty and `vector` is empty.
+
+- Candidates come from BM25F only.
+- Fusion weight is treated as lexical-only.
+- `radius` is invalid in this mode because no vector distance is available.
 
 ## Reranking (Second Stage)
 

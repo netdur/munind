@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
             );
         }
         Commands::Ingest { file, doc_id } => {
-            let engine = MunindEngine::open(&cli.db, base_config.clone())
+            let engine = MunindEngine::open(&cli.db)
                 .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
             let rag = RagPipeline::new(engine, build_embedder(&embed_cfg)?);
 
@@ -196,7 +196,7 @@ fn main() -> anyhow::Result<()> {
             println!("Successfully ingested {} chunk(s).", ids.len());
         }
         Commands::Search { query, top_k } => {
-            let engine = MunindEngine::open(&cli.db, base_config.clone())
+            let engine = MunindEngine::open(&cli.db)
                 .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
 
             let mut rag = RagPipeline::new(engine, build_embedder(&embed_cfg)?)
@@ -234,7 +234,7 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::CheckHealth => {
             println!("Opening existing Munind database at {:?}", cli.db);
-            let _engine = MunindEngine::open(&cli.db, base_config)
+            let _engine = MunindEngine::open(&cli.db)
                 .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
             println!("Database health check: OK");
         }
