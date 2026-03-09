@@ -1,10 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use munind_api::MunindEngine;
 use munind_core::config::EngineConfig;
+use munind_core::domain::{MemoryId, OptimizeRequest};
+use munind_core::engine::VectorEngine;
 use munind_rag::{
     DeterministicEmbedder, EmbeddingProvider, OpenAICompatibleEmbedder, OpenAICompatibleReranker,
     RagPipeline,
 };
+use munind_storage::StorageEngine;
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 
@@ -74,9 +78,76 @@ enum Commands {
         /// Number of results to return
         #[arg(short = 'k', long, default_value_t = 5)]
         top_k: usize,
+
+        /// Print machine-readable JSON output instead of human text
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Inserts a single embedding + JSON document record
+    Insert {
+        /// Embedding vector as JSON array string, e.g. "[0.1,0.2]"
+        #[arg(long)]
+        embedding_json: Option<String>,
+        /// Path to file containing embedding JSON array
+        #[arg(long)]
+        embedding_file: Option<PathBuf>,
+        /// Document payload as JSON object string
+        #[arg(long)]
+        document_json: Option<String>,
+        /// Path to file containing document JSON object
+        #[arg(long)]
+        document_file: Option<PathBuf>,
+    },
+    /// Gets a record by id
+    Get {
+        /// Record id
+        #[arg(long)]
+        id: u64,
+        /// Include embedding in output (can be large)
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        include_embedding: bool,
+        /// Print compact JSON output
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Updates an existing record by id
+    Update {
+        /// Record id
+        #[arg(long)]
+        id: u64,
+        /// Embedding vector as JSON array string, e.g. "[0.1,0.2]"
+        #[arg(long)]
+        embedding_json: Option<String>,
+        /// Path to file containing embedding JSON array
+        #[arg(long)]
+        embedding_file: Option<PathBuf>,
+        /// Document payload as JSON object string
+        #[arg(long)]
+        document_json: Option<String>,
+        /// Path to file containing document JSON object
+        #[arg(long)]
+        document_file: Option<PathBuf>,
+    },
+    /// Deletes a record by id
+    Delete {
+        /// Record id
+        #[arg(long)]
+        id: u64,
     },
     /// Checks the health of the database
     CheckHealth,
+    /// Optimizes storage and optionally repairs graph/index state
+    Optimize {
+        /// Disable full compaction (by default optimize compacts and truncates WAL)
+        #[arg(long = "no-compact", action = ArgAction::SetFalse, default_value_t = true)]
+        compact: bool,
+        /// Only write checkpoint + truncate WAL (no segment rewrite)
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        checkpoint_wal_only: bool,
+        /// Rebuild graph/index state from storage
+        #[arg(long, default_value_t = false, action = ArgAction::SetTrue)]
+        repair_graph: bool,
+    },
 }
 
 #[derive(Clone)]
@@ -156,6 +227,55 @@ fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<Option<OpenAICompatibl
     Ok(Some(reranker))
 }
 
+fn read_json_input(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+    label: &str,
+) -> anyhow::Result<String> {
+    match (inline, file) {
+        (Some(s), None) => Ok(s),
+        (None, Some(path)) => fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read {} file {:?}: {}", label, path, e)),
+        (None, None) => anyhow::bail!(
+            "missing {} input: provide either --{}-json or --{}-file",
+            label,
+            label,
+            label
+        ),
+        (Some(_), Some(_)) => anyhow::bail!(
+            "ambiguous {} input: provide only one of --{}-json or --{}-file",
+            label,
+            label,
+            label
+        ),
+    }
+}
+
+fn parse_embedding_json(raw: &str) -> anyhow::Result<Vec<f32>> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("invalid embedding json: {}", e))?;
+    let arr = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("embedding must be a JSON array"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let n = item
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("embedding[{}] must be a number", i))?;
+        out.push(n as f32);
+    }
+    Ok(out)
+}
+
+fn parse_document_json(raw: &str) -> anyhow::Result<Value> {
+    let value: Value =
+        serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("invalid document json: {}", e))?;
+    if !value.is_object() {
+        anyhow::bail!("document must be a JSON object");
+    }
+    Ok(value)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let base_config = EngineConfig::default();
@@ -195,7 +315,7 @@ fn main() -> anyhow::Result<()> {
 
             println!("Successfully ingested {} chunk(s).", ids.len());
         }
-        Commands::Search { query, top_k } => {
+        Commands::Search { query, top_k, json } => {
             let engine = MunindEngine::open(&cli.db)
                 .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
 
@@ -210,33 +330,166 @@ fn main() -> anyhow::Result<()> {
                 .search(&query, top_k)
                 .map_err(|e| anyhow::anyhow!("Search failed: {:?}", e))?;
 
-            println!("Found {} results for '{}':", results.len(), query);
-            for (i, hit) in results.iter().enumerate() {
-                let text = hit
-                    .document
-                    .get("text")
-                    .and_then(|t: &serde_json::Value| t.as_str())
-                    .unwrap_or("No text");
-                let doc_id = hit
-                    .document
-                    .get("doc_id")
-                    .and_then(|t: &serde_json::Value| t.as_str())
-                    .unwrap_or("Unknown");
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                println!("Found {} results for '{}':", results.len(), query);
+                for (i, hit) in results.iter().enumerate() {
+                    let text = hit
+                        .document
+                        .get("text")
+                        .and_then(|t: &serde_json::Value| t.as_str())
+                        .unwrap_or("No text");
+                    let doc_id = hit
+                        .document
+                        .get("doc_id")
+                        .and_then(|t: &serde_json::Value| t.as_str())
+                        .unwrap_or("Unknown");
 
-                println!(
-                    "{}. [Score: {:.4}] [Doc: {}] {}",
-                    i + 1,
-                    hit.score,
-                    doc_id,
-                    text.replace('\n', " ")
-                );
+                    println!(
+                        "{}. [Score: {:.4}] [Doc: {}] {}",
+                        i + 1,
+                        hit.score,
+                        doc_id,
+                        text.replace('\n', " ")
+                    );
+                }
             }
+        }
+        Commands::Insert {
+            embedding_json,
+            embedding_file,
+            document_json,
+            document_file,
+        } => {
+            let embedding_raw = read_json_input(embedding_json, embedding_file, "embedding")?;
+            let document_raw = read_json_input(document_json, document_file, "document")?;
+            let embedding = parse_embedding_json(&embedding_raw)?;
+            let document = parse_document_json(&document_raw)?;
+
+            let engine = MunindEngine::open(&cli.db)
+                .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
+            let id = engine
+                .insert_json(embedding, document)
+                .map_err(|e| anyhow::anyhow!("Insert failed: {:?}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": "ok",
+                    "id": id.0
+                }))?
+            );
+        }
+        Commands::Get {
+            id,
+            include_embedding,
+            json,
+        } => {
+            let engine = MunindEngine::open(&cli.db)
+                .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
+            let Some((embedding, document)) = engine
+                .get_record(MemoryId(id))
+                .map_err(|e| anyhow::anyhow!("Get failed: {:?}", e))?
+            else {
+                anyhow::bail!("record id {} not found", id);
+            };
+
+            let output = if include_embedding {
+                json!({"id": id, "embedding": embedding, "document": document})
+            } else {
+                json!({"id": id, "document": document})
+            };
+
+            if json {
+                println!("{}", serde_json::to_string(&output)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
+        }
+        Commands::Update {
+            id,
+            embedding_json,
+            embedding_file,
+            document_json,
+            document_file,
+        } => {
+            let embedding_raw = read_json_input(embedding_json, embedding_file, "embedding")?;
+            let document_raw = read_json_input(document_json, document_file, "document")?;
+            let embedding = parse_embedding_json(&embedding_raw)?;
+            let document = parse_document_json(&document_raw)?;
+
+            let engine = MunindEngine::open(&cli.db)
+                .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
+            engine
+                .update_json(MemoryId(id), embedding, document)
+                .map_err(|e| anyhow::anyhow!("Update failed: {:?}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": "ok",
+                    "id": id
+                }))?
+            );
+        }
+        Commands::Delete { id } => {
+            let engine = MunindEngine::open(&cli.db)
+                .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
+            engine
+                .remove(MemoryId(id))
+                .map_err(|e| anyhow::anyhow!("Delete failed: {:?}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "status": "ok",
+                    "id": id
+                }))?
+            );
         }
         Commands::CheckHealth => {
             println!("Opening existing Munind database at {:?}", cli.db);
             let _engine = MunindEngine::open(&cli.db)
                 .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
             println!("Database health check: OK");
+        }
+        Commands::Optimize {
+            compact,
+            checkpoint_wal_only,
+            repair_graph,
+        } => {
+            println!("Opening existing Munind database at {:?}", cli.db);
+            let effective_compact = if checkpoint_wal_only { false } else { compact };
+            println!(
+                "Running optimize (compact: {}, checkpoint_wal_only: {}, repair_graph: {})...",
+                effective_compact, checkpoint_wal_only, repair_graph
+            );
+
+            let report = if checkpoint_wal_only && !repair_graph && !effective_compact {
+                // Fast path: storage-only checkpoint avoids rebuilding ANN/lexical indexes.
+                let storage = StorageEngine::open(&cli.db)
+                    .map_err(|e| anyhow::anyhow!("Failed to open storage: {:?}", e))?;
+                storage
+                    .optimize(OptimizeRequest {
+                        force_full_compaction: false,
+                        repair_graph: false,
+                        checkpoint_wal_only: true,
+                    })
+                    .map_err(|e| anyhow::anyhow!("Optimize failed: {:?}", e))?
+            } else {
+                let engine = MunindEngine::open(&cli.db)
+                    .map_err(|e| anyhow::anyhow!("Failed to open engine: {:?}", e))?;
+                engine
+                    .optimize(OptimizeRequest {
+                        force_full_compaction: effective_compact,
+                        repair_graph,
+                        checkpoint_wal_only,
+                    })
+                    .map_err(|e| anyhow::anyhow!("Optimize failed: {:?}", e))?
+            };
+
+            println!("Optimization complete:");
+            println!("  records_compacted: {}", report.records_compacted);
+            println!("  space_reclaimed_bytes: {}", report.space_reclaimed_bytes);
+            println!("  graph_edges_repaired: {}", report.graph_edges_repaired);
         }
     }
 

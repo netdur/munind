@@ -285,6 +285,39 @@ impl StorageEngine {
             None => Ok(None),
         }
     }
+
+    pub fn update_json(&self, id: MemoryId, embedding: Vec<f32>, document: Value) -> Result<()> {
+        if embedding.len() != self.manifest.embedding_dimension {
+            return Err(MunindError::DimensionMismatch {
+                expected: self.manifest.embedding_dimension,
+                actual: embedding.len(),
+            });
+        }
+
+        let exists = {
+            let alloc = self.id_read()?;
+            alloc.get_location(id).is_some()
+        };
+        if !exists {
+            return Err(MunindError::NotFound(id.0));
+        }
+
+        let record = WalRecord {
+            op: OpType::Update {
+                embedding: embedding.clone(),
+                document: document.clone(),
+            },
+            memory_id: id,
+        };
+        self.wal_lock()?.append(&record)?;
+
+        let v_off = self.vec_lock()?.append(&embedding)?;
+        let j_off = self.json_lock()?.append(&document)?;
+
+        let mut alloc = self.id_write()?;
+        alloc.set_location(id, v_off, j_off);
+        Ok(())
+    }
 }
 
 impl VectorEngine for StorageEngine {
@@ -370,6 +403,33 @@ impl VectorEngine for StorageEngine {
     }
 
     fn optimize(&self, req: OptimizeRequest) -> Result<OptimizeReport> {
+        if req.checkpoint_wal_only && !req.force_full_compaction {
+            let before_bytes = self.storage_bytes();
+
+            let mut wal = self.wal_lock()?;
+            let mut vec_seg = self.vec_lock()?;
+            let mut json_seg = self.json_lock()?;
+            let alloc = self.id_read()?.clone();
+
+            // Persist current materialized state and allocator snapshot, then clear WAL tail.
+            vec_seg.flush()?;
+            json_seg.flush()?;
+            Self::write_checkpoint_atomic(&self.data_dir, &alloc)?;
+            wal.reset()?;
+
+            drop(json_seg);
+            drop(vec_seg);
+            drop(wal);
+            self.sync_all()?;
+
+            let after_bytes = self.storage_bytes();
+            return Ok(OptimizeReport {
+                records_compacted: 0,
+                space_reclaimed_bytes: before_bytes.saturating_sub(after_bytes),
+                graph_edges_repaired: 0,
+            });
+        }
+
         if !req.force_full_compaction {
             return Ok(OptimizeReport::default());
         }

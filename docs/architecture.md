@@ -28,7 +28,7 @@ Example workloads this architecture supports:
 - `crates/munind-rag`
   - Ingestion/retrieval pipeline module with embedding provider abstraction and optional reranking.
 - `crates/munind-cli`
-  - User-facing create/ingest/search/check-health commands.
+  - User-facing create/ingest/search/check-health/optimize commands.
 - `crates/munind-bench`
   - Benchmark harness for speed and quality.
 
@@ -82,7 +82,8 @@ Exact-match postings on frequent filter fields:
 
 - WAL is authoritative for recovery.
 - On open, storage replays WAL and rebuilds segments/state.
-- `optimize(force_full_compaction)` compacts live records and rebuilds index state.
+- `optimize(force_full_compaction)` writes a checkpoint and truncates WAL.
+- `optimize(repair_graph)` rebuilds in-memory graph/index state from current storage.
 
 ## Current Non-Goals
 

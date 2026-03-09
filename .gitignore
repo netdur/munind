@@ -4,10 +4,13 @@
 # Local runtime database/state
 /munind_data/
 /benchmark/tmp_db/
+/benchmark/tinystories_db/
 
 # Benchmark input/output artifacts
 /benchmark/data/
 /benchmark/results/
+/examples/crud/target/
+/examples/crud/tmp_db/
 
 # Secrets and local environment files
 .env

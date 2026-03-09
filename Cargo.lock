@@ -681,6 +681,7 @@ dependencies = [
  "munind-api",
  "munind-core",
  "munind-rag",
+ "munind-storage",
  "serde",
  "serde_json",
 ]
@@ -694,6 +695,7 @@ dependencies = [
  "munind-api",
  "munind-core",
  "munind-rag",
+ "munind-storage",
  "serde_json",
 ]
 
@@ -714,6 +716,7 @@ dependencies = [
  "rand 0.10.0",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

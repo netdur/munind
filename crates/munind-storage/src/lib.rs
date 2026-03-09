@@ -244,6 +244,7 @@ mod tests {
                 .optimize(OptimizeRequest {
                     force_full_compaction: true,
                     repair_graph: false,
+                    checkpoint_wal_only: false,
                 })
                 .unwrap();
             assert_eq!(report.records_compacted, 1);
@@ -269,6 +270,74 @@ mod tests {
         let doc3 = reopened.get_document(id3).unwrap().unwrap();
         assert_eq!(doc3["name"], serde_json::json!("doc3"));
     }
+
+    #[test]
+    fn test_optimize_checkpoint_only_truncates_wal_without_full_compaction() {
+        use munind_core::domain::OptimizeRequest;
+        use munind_core::engine::VectorEngine;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let config = EngineConfig::default();
+
+        let id1;
+        let id2;
+        {
+            let engine = StorageEngine::create(&path, 3, config).unwrap();
+            id1 = engine
+                .insert_json(vec![1.0, 0.0, 0.0], serde_json::json!({"name": "doc1"}))
+                .unwrap();
+            id2 = engine
+                .insert_json(vec![0.0, 1.0, 0.0], serde_json::json!({"name": "doc2"}))
+                .unwrap();
+
+            let report = engine
+                .optimize(OptimizeRequest {
+                    force_full_compaction: false,
+                    repair_graph: false,
+                    checkpoint_wal_only: true,
+                })
+                .unwrap();
+            assert_eq!(report.records_compacted, 0);
+            assert!(report.space_reclaimed_bytes > 0);
+            assert!(path.join("snapshots/state-checkpoint.json").exists());
+            assert_eq!(fs::metadata(path.join("wal/000001.wal")).unwrap().len(), 0);
+        }
+
+        let reopened = StorageEngine::open(&path).unwrap();
+        let alloc = reopened.id_alloc.read().unwrap();
+        assert_eq!(alloc.len(), 2);
+        assert!(alloc.get_location(id1).is_some());
+        assert!(alloc.get_location(id2).is_some());
+        drop(alloc);
+    }
+
+    #[test]
+    fn test_update_json_persists_with_same_id() {
+        use munind_core::engine::VectorEngine;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let config = EngineConfig::default();
+        let id;
+
+        {
+            let engine = StorageEngine::create(&path, 3, config).unwrap();
+            id = engine
+                .insert_json(vec![1.0, 0.0, 0.0], serde_json::json!({"name": "old"}))
+                .unwrap();
+            engine
+                .update_json(id, vec![0.0, 1.0, 0.0], serde_json::json!({"name": "new"}))
+                .unwrap();
+        }
+
+        let reopened = StorageEngine::open(&path).unwrap();
+        let doc = reopened.get_document(id).unwrap().unwrap();
+        let vec = reopened.get_vector(id).unwrap().unwrap();
+        assert_eq!(doc["name"], serde_json::json!("new"));
+        assert_eq!(vec, vec![0.0, 1.0, 0.0]);
+    }
+
     #[test]
     fn test_remove_missing_returns_not_found() {
         use munind_core::engine::VectorEngine;

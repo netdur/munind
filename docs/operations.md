@@ -45,6 +45,12 @@ Programmatic optimize can compact storage and rebuild graph/index state:
 - `force_full_compaction: true` rewrites live records.
 - `repair_graph: true` rebuilds graph edges from current data.
 
+CLI equivalent:
+
+```bash
+cargo run -p munind-cli -- --db ./munind_data optimize
+```
+
 ## Common Issues
 
 ### 1) Dimension mismatch
@@ -69,6 +75,16 @@ Checks:
 Checks:
 - `Eq` is exact JSON value match (type-sensitive).
 - Path must match stored JSON (`source` vs `metadata.source`).
+
+### 4) WAL file grows large
+
+Cause:
+- WAL keeps accumulating write records until a compaction/checkpoint pass runs.
+
+Fix:
+- Run:
+  `cargo run -p munind-cli -- --db ./munind_data optimize`
+- For benchmark flow, keep phase-2 compaction enabled (`COMPACT_AFTER_PREPARE=1`, default).
 
 ## Upgrade Safety
 

@@ -36,6 +36,33 @@ let doc = json!({
 let id = engine.insert_json(embedding, doc)?;
 ```
 
+## Read by ID
+
+```rust
+use munind_core::domain::MemoryId;
+
+if let Some((embedding, doc)) = engine.get_record(MemoryId(1))? {
+    println!("doc: {}", doc);
+    println!("embedding dim: {}", embedding.len());
+}
+```
+
+## Update by ID
+
+```rust
+use munind_core::domain::MemoryId;
+use serde_json::json;
+
+engine.update_json(
+    MemoryId(1),
+    vec![0.1_f32; 512],
+    json!({
+      "doc_id": "note-001",
+      "text": "updated text"
+    }),
+)?;
+```
+
 ## Vector Search
 
 ```rust
@@ -116,6 +143,7 @@ engine.remove(id)?;
 let report = engine.optimize(OptimizeRequest {
     force_full_compaction: true,
     repair_graph: true,
+    checkpoint_wal_only: false,
 })?;
 ```
 

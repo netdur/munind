@@ -1,0 +1,13 @@
+[package]
+name = "munind-crud-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+munind-api = { path = "../../crates/munind-api" }
+munind-core = { path = "../../crates/munind-core" }
+serde_json = "1.0"
+
+[workspace]

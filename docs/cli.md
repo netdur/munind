@@ -26,12 +26,62 @@ cargo run -p munind-cli -- \
   ingest --file ./test_doc.txt --doc-id demo-1
 ```
 
+## CRUD Commands (JSON I/O)
+
+Insert one record:
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  insert \
+  --embedding-json '[0.1,0.2,0.3]' \
+  --document-json '{"doc_id":"x1","text":"hello"}'
+```
+
+Get by id:
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  get --id 1 --include-embedding
+```
+
+Update by id:
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  update --id 1 \
+  --embedding-json '[0.2,0.1,0.0]' \
+  --document-json '{"doc_id":"x1","text":"updated"}'
+```
+
+Delete by id:
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  delete --id 1
+```
+
+For `insert` and `update`, you can also pass files:
+- `--embedding-file <path>` instead of `--embedding-json`
+- `--document-file <path>` instead of `--document-json`
+
 ## Search
 
 ```bash
 cargo run -p munind-cli -- \
   --db ./munind_data \
   search "what did I write about habits" -k 5
+```
+
+Machine-readable output:
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  search "what did I write about habits" -k 5 --json
 ```
 
 ## Health Check
@@ -41,6 +91,21 @@ cargo run -p munind-cli -- \
   --db ./munind_data \
   check-health
 ```
+
+## Optimize (Compaction / WAL Truncation)
+
+Compaction rewrites live records, writes a checkpoint, and truncates WAL.
+
+```bash
+cargo run -p munind-cli -- \
+  --db ./munind_data \
+  optimize
+```
+
+Optional flags:
+- `--no-compact` (skip full compaction/WAL truncation)
+- `--checkpoint-wal-only` (fast path: write checkpoint + truncate WAL without full segment rewrite or index rebuild)
+- `--repair-graph` (also rebuild graph/index state)
 
 ## Embedding Provider Options
 
@@ -86,3 +151,4 @@ Global flags:
 
 - CLI ingest currently chunks text and stores one JSON record per chunk.
 - Search output returns top documents with score, doc_id, and text snippet.
+- CLI CRUD commands (`insert/get/update/delete`) are intended as a stable cross-language integration surface.

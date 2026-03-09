@@ -19,8 +19,9 @@ pub use worker::GraphWorker;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use munind_core::config::IndexConfig;
+    use munind_core::config::{EngineConfig, IndexConfig};
     use munind_core::domain::MemoryId;
+    use tempfile::tempdir;
 
     #[test]
     fn test_graph_add_remove() {
@@ -225,5 +226,51 @@ mod tests {
         let found_ids2: Vec<u64> = results2.iter().map(|r| r.id.0).collect();
         assert!(!found_ids2.contains(&15));
         assert!(found_ids2.contains(&14) || found_ids2.contains(&17));
+    }
+
+    #[test]
+    fn test_index_snapshot_round_trip() {
+        let dir = tempdir().unwrap();
+        let snapshot = dir.path().join("index.snapshot");
+
+        let mut config = EngineConfig::default();
+        config.index.metric = munind_core::config::DistanceMetric::L2;
+        config.index.ef_construction = 32;
+        config.index.ef_search = 64;
+
+        let mut engine = IndexEngine::new(&config);
+        engine.insert(MemoryId(1), vec![0.0, 0.0, 0.0]);
+        engine.insert(MemoryId(2), vec![1.0, 0.0, 0.0]);
+        engine.insert(MemoryId(3), vec![2.0, 0.0, 0.0]);
+        engine.save_snapshot(&snapshot).unwrap();
+
+        let loaded = IndexEngine::load_snapshot(
+            &snapshot,
+            &[MemoryId(1), MemoryId(2), MemoryId(3)],
+            &config,
+        )
+        .unwrap()
+        .expect("snapshot should load");
+
+        let query = vec![1.1, 0.0, 0.0];
+        let hits = loaded.search(&query, 2);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().any(|h| h.id == MemoryId(2)));
+    }
+
+    #[test]
+    fn test_index_snapshot_stale_id_set_is_rejected() {
+        let dir = tempdir().unwrap();
+        let snapshot = dir.path().join("index.snapshot");
+        let config = EngineConfig::default();
+
+        let mut engine = IndexEngine::new(&config);
+        engine.insert(MemoryId(1), vec![0.0, 0.0, 0.0]);
+        engine.insert(MemoryId(2), vec![1.0, 0.0, 0.0]);
+        engine.save_snapshot(&snapshot).unwrap();
+
+        let stale =
+            IndexEngine::load_snapshot(&snapshot, &[MemoryId(1), MemoryId(3)], &config).unwrap();
+        assert!(stale.is_none());
     }
 }

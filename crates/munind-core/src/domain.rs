@@ -44,6 +44,7 @@ pub struct SearchHit {
 pub struct OptimizeRequest {
     pub force_full_compaction: bool,
     pub repair_graph: bool,
+    pub checkpoint_wal_only: bool,
 }
 
 /// Report after optimization completes.

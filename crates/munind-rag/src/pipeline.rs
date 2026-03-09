@@ -306,9 +306,15 @@ impl EmbeddingProvider for OpenAICompatibleEmbedder {
             .build()
             .map_err(|e| MunindError::Internal(format!("failed to build embedding client: {e}")))?;
 
+        let input_payload = if chunks.len() == 1 {
+            json!(chunks[0])
+        } else {
+            json!(chunks)
+        };
+
         let mut req = client.post(&self.endpoint).json(&json!({
             "model": self.model_id,
-            "input": chunks,
+            "input": input_payload,
         }));
 
         if let Some(api_key) = &self.api_key {

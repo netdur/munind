@@ -10,6 +10,8 @@ This directory contains implementation and usage documentation for Munind.
   - Vector search, hybrid retrieval, payload-indexed filters, reranking.
 - [CLI Guide](./cli.md)
   - End-to-end local usage with deterministic or external embedding/reranker services.
+- [Language Integration](./language-integration.md)
+  - JSON CLI integration patterns for Python/C and other languages.
 - [Rust API Guide](./rust-api.md)
   - Programmatic create/insert/search/optimize examples.
 - [Benchmarking](./benchmarking.md)

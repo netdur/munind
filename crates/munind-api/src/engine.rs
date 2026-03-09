@@ -11,10 +11,12 @@ use munind_storage::StorageEngine;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 
 const FILTERED_EXACT_SCAN_THRESHOLD: usize = 50_000;
+const ANN_SNAPSHOT_FILE: &str = "index/ann-index.snapshot";
 
 fn json_path_get<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
     let mut current = doc;
@@ -67,6 +69,8 @@ fn normalize_scores(scores: &HashMap<MemoryId, f32>) -> HashMap<MemoryId, f32> {
 /// The central Munind database engine wrapping durable storage, graph index, lexical index,
 /// and payload indexes for metadata filters.
 pub struct MunindEngine {
+    data_dir: PathBuf,
+    ann_only_mode: bool,
     config: EngineConfig,
     storage: StorageEngine,
     index: RwLock<IndexEngine>,
@@ -94,6 +98,8 @@ impl MunindEngine {
         let payload = PayloadIndex::new();
 
         Ok(Self {
+            data_dir: path,
+            ann_only_mode: false,
             config,
             storage,
             index: RwLock::new(index),
@@ -102,30 +108,106 @@ impl MunindEngine {
         })
     }
 
-    fn build_indexes_from_storage(
+    fn ann_snapshot_path(data_dir: &Path) -> PathBuf {
+        data_dir.join(ANN_SNAPSHOT_FILE)
+    }
+
+    fn write_ann_snapshot_atomic(data_dir: &Path, index: &IndexEngine) -> Result<()> {
+        let snapshot_path = Self::ann_snapshot_path(data_dir);
+        let tmp_path = snapshot_path.with_extension("tmp");
+        index.save_snapshot(&tmp_path)?;
+        std::fs::rename(&tmp_path, &snapshot_path).map_err(MunindError::Io)?;
+        Ok(())
+    }
+
+    fn save_ann_snapshot(&self) -> Result<()> {
+        let index = self.index_read()?;
+        Self::write_ann_snapshot_atomic(&self.data_dir, &index)
+    }
+
+    fn open_progress_enabled() -> bool {
+        std::env::var("MUNIND_OPEN_PROGRESS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn build_ann_index_from_storage(
         storage: &StorageEngine,
         config: &EngineConfig,
-    ) -> Result<(IndexEngine, LexicalIndex, PayloadIndex)> {
+        ids: &[MemoryId],
+        show_progress: bool,
+    ) -> Result<IndexEngine> {
         let mut index = IndexEngine::new(config);
-        let mut lexical = LexicalIndex::new();
-        let mut payload = PayloadIndex::new();
+        let total = ids.len();
+        let t0 = if show_progress {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        if show_progress {
+            eprintln!("rebuilding ANN index from storage: total_ids={total}");
+        }
 
-        for id in storage.get_all_ids()? {
-            if let Some(vector) = storage.get_vector(id)? {
-                index.insert(id, vector);
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(vector) = storage.get_vector(*id)? {
+                index.insert(*id, vector);
             }
-            if let Some(doc) = storage.get_document(id)? {
-                lexical.insert(id, &doc);
-                payload.insert(id, &doc);
+            if show_progress && ((i + 1) % 50_000 == 0 || i + 1 == total) {
+                eprintln!("ann rebuild progress: {}/{}", i + 1, total);
             }
         }
 
-        Ok((index, lexical, payload))
+        if let Some(start) = t0 {
+            eprintln!(
+                "ann rebuild complete: {} records in {:.2}s",
+                total,
+                start.elapsed().as_secs_f64()
+            );
+        }
+
+        Ok(index)
     }
 
-    /// Opens an existing database.
-    pub fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
-        let path = data_dir.as_ref().to_path_buf();
+    fn build_doc_indexes_from_storage(
+        storage: &StorageEngine,
+        ids: &[MemoryId],
+        show_progress: bool,
+    ) -> Result<(LexicalIndex, PayloadIndex)> {
+        let mut lexical = LexicalIndex::new();
+        let mut payload = PayloadIndex::new();
+        let total = ids.len();
+        let t0 = if show_progress {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        if show_progress {
+            eprintln!("rebuilding lexical/payload indexes from storage: total_ids={total}");
+        }
+
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(doc) = storage.get_document(*id)? {
+                lexical.insert(*id, &doc);
+                payload.insert(*id, &doc);
+            }
+            if show_progress && ((i + 1) % 50_000 == 0 || i + 1 == total) {
+                eprintln!("doc index rebuild progress: {}/{}", i + 1, total);
+            }
+        }
+
+        if let Some(start) = t0 {
+            eprintln!(
+                "doc index rebuild complete: {} records in {:.2}s",
+                total,
+                start.elapsed().as_secs_f64()
+            );
+        }
+
+        Ok((lexical, payload))
+    }
+
+    fn open_internal(path: PathBuf, build_doc_indexes: bool) -> Result<Self> {
+        let path = path;
 
         let manifest_path = path.join("MANIFEST.json");
         if !manifest_path.exists() {
@@ -137,15 +219,74 @@ impl MunindEngine {
 
         let storage = StorageEngine::open(&path)?;
         let config = storage.manifest.config.clone();
-        let (index, lexical, payload) = Self::build_indexes_from_storage(&storage, &config)?;
+        let ids = storage.get_all_ids()?;
+        let show_progress = Self::open_progress_enabled();
+        let snapshot_path = Self::ann_snapshot_path(&path);
+
+        let (index, loaded_from_snapshot) =
+            match IndexEngine::load_snapshot(&snapshot_path, &ids, &config) {
+                Ok(Some(idx)) => {
+                    if show_progress {
+                        eprintln!("loaded ANN snapshot from {}", snapshot_path.display());
+                    }
+                    (idx, true)
+                }
+                Ok(None) => {
+                    if show_progress {
+                        eprintln!(
+                            "ANN snapshot missing/stale, rebuilding from storage: {}",
+                            snapshot_path.display()
+                        );
+                    }
+                    (
+                        Self::build_ann_index_from_storage(&storage, &config, &ids, show_progress)?,
+                        false,
+                    )
+                }
+                Err(err) => {
+                    eprintln!(
+                        "warning: ANN snapshot load failed ({}), rebuilding from storage",
+                        err
+                    );
+                    (
+                        Self::build_ann_index_from_storage(&storage, &config, &ids, show_progress)?,
+                        false,
+                    )
+                }
+            };
+
+        let (lexical, payload) = if build_doc_indexes {
+            Self::build_doc_indexes_from_storage(&storage, &ids, show_progress)?
+        } else {
+            if show_progress {
+                eprintln!("ANN-only open: skipping lexical/payload index rebuild");
+            }
+            (LexicalIndex::new(), PayloadIndex::new())
+        };
+
+        if !loaded_from_snapshot && let Err(err) = Self::write_ann_snapshot_atomic(&path, &index) {
+            eprintln!("warning: failed to write ANN snapshot: {}", err);
+        }
 
         Ok(Self {
+            data_dir: path,
+            ann_only_mode: !build_doc_indexes,
             config,
             storage,
             index: RwLock::new(index),
             lexical: RwLock::new(lexical),
             payload: RwLock::new(payload),
         })
+    }
+
+    /// Opens an existing database with full query capabilities.
+    pub fn open<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+        Self::open_internal(data_dir.as_ref().to_path_buf(), true)
+    }
+
+    /// Opens an existing database in ANN-only mode (vector search only).
+    pub fn open_ann_only<P: AsRef<Path>>(data_dir: P) -> Result<Self> {
+        Self::open_internal(data_dir.as_ref().to_path_buf(), false)
     }
 
     pub fn embedding_dimension(&self) -> usize {
@@ -202,7 +343,48 @@ impl MunindEngine {
     }
 
     fn rebuild_indexes_from_storage(&self) -> Result<(IndexEngine, LexicalIndex, PayloadIndex)> {
-        Self::build_indexes_from_storage(&self.storage, &self.config)
+        let ids = self.storage.get_all_ids()?;
+        let show_progress = Self::open_progress_enabled();
+        let index =
+            Self::build_ann_index_from_storage(&self.storage, &self.config, &ids, show_progress)?;
+        let (lexical, payload) =
+            Self::build_doc_indexes_from_storage(&self.storage, &ids, show_progress)?;
+        Ok((index, lexical, payload))
+    }
+
+    /// Returns the current embedding + document payload for a record id.
+    pub fn get_record(&self, id: MemoryId) -> Result<Option<(Vec<f32>, Value)>> {
+        let embedding = self.storage.get_vector(id)?;
+        let document = self.storage.get_document(id)?;
+        match (embedding, document) {
+            (Some(emb), Some(doc)) => Ok(Some((emb, doc))),
+            (None, None) => Ok(None),
+            _ => Err(MunindError::Corruption(format!(
+                "record {} has inconsistent vector/document state",
+                id.0
+            ))),
+        }
+    }
+
+    /// Updates an existing record in-place (same id, new embedding/document).
+    pub fn update_json(&self, id: MemoryId, embedding: Vec<f32>, document: Value) -> Result<()> {
+        if self.storage.get_document(id)?.is_none() {
+            return Err(MunindError::NotFound(id.0));
+        }
+
+        let mut indexes = self.indexes_write()?;
+        self.storage
+            .update_json(id, embedding.clone(), document.clone())?;
+
+        indexes.index.delete(id);
+        indexes.lexical.remove(id);
+        indexes.payload.remove(id);
+
+        indexes.index.insert(id, embedding);
+        indexes.lexical.insert(id, &document);
+        indexes.payload.insert(id, &document);
+
+        Ok(())
     }
 }
 
@@ -247,6 +429,11 @@ impl VectorEngine for MunindEngine {
             .map(|q| q.trim())
             .filter(|q| !q.is_empty());
         let hybrid_enabled = hybrid_query.is_some();
+        if self.ann_only_mode && (hybrid_enabled || req.filter.is_some()) {
+            return Err(MunindError::Internal(
+                "ANN-only open mode does not support lexical or filter queries".to_string(),
+            ));
+        }
         let lexical_only = req.vector.is_empty() && hybrid_enabled;
 
         if !lexical_only && req.vector.len() != self.embedding_dimension() {
@@ -446,6 +633,10 @@ impl VectorEngine for MunindEngine {
 
     fn optimize(&self, req: OptimizeRequest) -> Result<OptimizeReport> {
         let storage_report = self.storage.optimize(req.clone())?;
+        if req.checkpoint_wal_only && !req.force_full_compaction && !req.repair_graph {
+            self.save_ann_snapshot()?;
+            return Ok(storage_report);
+        }
         if !req.repair_graph && !req.force_full_compaction {
             return Ok(storage_report);
         }
@@ -457,6 +648,9 @@ impl VectorEngine for MunindEngine {
         *indexes.index = new_index;
         *indexes.lexical = new_lexical;
         *indexes.payload = new_payload;
+        drop(indexes);
+
+        self.save_ann_snapshot()?;
 
         Ok(OptimizeReport {
             records_compacted: if req.force_full_compaction {
@@ -518,6 +712,55 @@ mod tests {
 
         let idx = opened.index_read().unwrap();
         assert_eq!(idx.default_ef_search(), 123);
+    }
+
+    #[test]
+    fn test_open_ann_only_rejects_filter_queries() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let cfg = EngineConfig::default();
+
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+        engine
+            .insert_json(
+                vec![1.0, 0.0, 0.0],
+                serde_json::json!({"source": "tiny", "doc_id": "a"}),
+            )
+            .unwrap();
+        drop(engine);
+
+        let ann_only = MunindEngine::open_ann_only(&db_path).unwrap();
+
+        let plain = ann_only
+            .search(SearchRequest {
+                vector: vec![1.0, 0.0, 0.0],
+                top_k: 1,
+                text_query: None,
+                hybrid_alpha: None,
+                lexical_top_k: None,
+                filter: None,
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap();
+        assert_eq!(plain.len(), 1);
+
+        let err = ann_only
+            .search(SearchRequest {
+                vector: vec![1.0, 0.0, 0.0],
+                top_k: 1,
+                text_query: None,
+                hybrid_alpha: None,
+                lexical_top_k: None,
+                filter: Some(FilterExpression::Eq(
+                    "source".to_string(),
+                    serde_json::json!("tiny"),
+                )),
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, MunindError::Internal(_)));
     }
 
     #[test]
@@ -680,6 +923,7 @@ mod tests {
             .optimize(OptimizeRequest {
                 force_full_compaction: false,
                 repair_graph: true,
+                checkpoint_wal_only: false,
             })
             .unwrap();
         assert!(report.graph_edges_repaired >= 1);
@@ -697,6 +941,92 @@ mod tests {
             })
             .unwrap();
         assert_eq!(after[0].id, id1);
+    }
+
+    #[test]
+    fn test_optimize_checkpoint_writes_ann_snapshot() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let cfg = EngineConfig::default();
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+
+        engine
+            .insert_json(vec![1.0, 0.0, 0.0], serde_json::json!({"doc_id": "a"}))
+            .unwrap();
+        engine
+            .insert_json(vec![0.0, 1.0, 0.0], serde_json::json!({"doc_id": "b"}))
+            .unwrap();
+
+        let report = engine
+            .optimize(OptimizeRequest {
+                force_full_compaction: false,
+                repair_graph: false,
+                checkpoint_wal_only: true,
+            })
+            .unwrap();
+        assert_eq!(report.graph_edges_repaired, 0);
+        assert!(db_path.join(super::ANN_SNAPSHOT_FILE).exists());
+
+        drop(engine);
+        let reopened = MunindEngine::open(&db_path).unwrap();
+        let hits = reopened
+            .search(SearchRequest {
+                vector: vec![1.0, 0.0, 0.0],
+                top_k: 1,
+                text_query: None,
+                hybrid_alpha: None,
+                lexical_top_k: None,
+                filter: None,
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn test_get_record_and_update_json() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("db");
+        let cfg = EngineConfig::default();
+        let engine = MunindEngine::create(&db_path, 3, cfg).unwrap();
+
+        let id = engine
+            .insert_json(vec![1.0, 0.0, 0.0], serde_json::json!({"doc_id": "old"}))
+            .unwrap();
+
+        let (emb_before, doc_before) = engine.get_record(id).unwrap().unwrap();
+        assert_eq!(emb_before, vec![1.0, 0.0, 0.0]);
+        assert_eq!(doc_before["doc_id"], serde_json::json!("old"));
+
+        engine
+            .update_json(
+                id,
+                vec![0.0, 1.0, 0.0],
+                serde_json::json!({"doc_id": "new", "text": "updated"}),
+            )
+            .unwrap();
+
+        let (emb_after, doc_after) = engine.get_record(id).unwrap().unwrap();
+        assert_eq!(emb_after, vec![0.0, 1.0, 0.0]);
+        assert_eq!(doc_after["doc_id"], serde_json::json!("new"));
+        assert_eq!(doc_after["text"], serde_json::json!("updated"));
+
+        let hits = engine
+            .search(SearchRequest {
+                vector: vec![0.0, 1.0, 0.0],
+                top_k: 1,
+                text_query: None,
+                hybrid_alpha: None,
+                lexical_top_k: None,
+                filter: None,
+                ef_search: None,
+                radius: None,
+            })
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, id);
+        assert_eq!(hits[0].document["doc_id"], serde_json::json!("new"));
     }
 
     #[test]

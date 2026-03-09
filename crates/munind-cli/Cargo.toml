@@ -10,5 +10,6 @@ clap = { version = "4.4", features = ["derive"] }
 munind-core = { path = "../munind-core" }
 munind-api = { path = "../munind-api" }
 munind-rag = { path = "../munind-rag" }
+munind-storage = { path = "../munind-storage" }
 anyhow = "1.0"
 serde_json = "1.0"
