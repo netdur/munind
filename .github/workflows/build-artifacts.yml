@@ -1,0 +1,74 @@
+name: Build Artifacts
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_suffix: linux
+            binary_ext: ""
+            lib_name: libmunind_api.so
+          - os: macos-latest
+            artifact_suffix: macos
+            binary_ext: ""
+            lib_name: libmunind_api.dylib
+          - os: windows-latest
+            artifact_suffix: windows
+            binary_ext: .exe
+            lib_name: munind_api.dll
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binaries
+        run: |
+          cargo build --release -p munind-cli
+          cargo build --release -p munind-bench --bin munind-bench --bin glove_hdf5_bench
+
+      - name: Build shared library
+        run: cargo build --release -p munind-api
+
+      - name: Package artifacts (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "target/release/munind-cli${{ matrix.binary_ext }}" "dist/"
+          cp "target/release/munind-bench${{ matrix.binary_ext }}" "dist/"
+          cp "target/release/glove_hdf5_bench${{ matrix.binary_ext }}" "dist/"
+          cp "target/release/${{ matrix.lib_name }}" "dist/"
+
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/release/munind-cli${{ matrix.binary_ext }}" "dist/"
+          Copy-Item "target/release/munind-bench${{ matrix.binary_ext }}" "dist/"
+          Copy-Item "target/release/glove_hdf5_bench${{ matrix.binary_ext }}" "dist/"
+          Copy-Item "target/release/${{ matrix.lib_name }}" "dist/"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: munind-${{ matrix.artifact_suffix }}
+          path: dist/*
+          if-no-files-found: error

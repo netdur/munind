@@ -5,6 +5,8 @@
 /munind_data/
 /benchmark/tmp_db/
 /benchmark/tinystories_db/
+/benchmark/glove_100_db/
+/benchmark/*_db/
 
 # Benchmark input/output artifacts
 /benchmark/data/

@@ -5,6 +5,9 @@ edition.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 munind-core = { path = "../munind-core" }
 munind-storage = { path = "../munind-storage" }
