@@ -15,6 +15,10 @@ Munind is application-agnostic at the core. It is not tied to a single memory or
 - Optional second-stage reranking
 - Indexed JSON filter execution for common metadata fields
 
+## Why Munind (no, really)
+
+- I built Munind because my AI agents needed a memory database, and tools like Milvus felt like overkill for a local-first setup
+
 ## Current Capabilities
 
 - Create/open DB with immutable embedding dimension
