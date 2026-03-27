@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+import re
+import subprocess
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+
+ROOT = Path(__file__).resolve().parent.parent
+NGT_BIN = ROOT / "vendors/ngt/build/bin/ngt/ngt"
+INDEX_PATH = ROOT / "benches/indexes/glove-100-angular-ngt"
+QUERY_PATH = ROOT / "benches/data/glove-100-angular.test.tsv"
+HDF5_PATH = ROOT / "benches/data/glove-100-angular.hdf5"
+
+TOP_K = 10
+EPSILONS = [0.1, 0.4]
+
+
+def load_ground_truth(hdf5_path: Path, k: int) -> np.ndarray:
+    with h5py.File(hdf5_path, "r") as f:
+        neighbors = np.array(f["neighbors"], dtype=np.int64)
+    return neighbors[:, :k]
+
+
+def run_ngt_search(ngt_bin: Path, index_path: Path, query_path: Path, k: int, epsilon: float) -> str:
+    cmd = [
+        str(ngt_bin),
+        "search",
+        "-n",
+        str(k),
+        "-e",
+        str(epsilon),
+        str(index_path),
+        str(query_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout
+
+
+def parse_ngt_output(output: str, k: int) -> tuple[np.ndarray, float]:
+    lines = output.splitlines()
+
+    results = []
+    current = []
+    avg_ms = None
+
+    avg_re = re.compile(r"Average Query Time=.*?,\s*([0-9.]+)\s*\(msec\)")
+    rank_re = re.compile(r"^\s*(\d+)\s+(\d+)\s+([0-9eE+.\-]+)\s*$")
+
+    for line in lines:
+        m_avg = avg_re.search(line)
+        if m_avg:
+            avg_ms = float(m_avg.group(1))
+            continue
+
+        m_rank = rank_re.match(line)
+        if m_rank:
+            rank = int(m_rank.group(1))
+            idx = int(m_rank.group(2))
+            if rank == 1 and current:
+                results.append(current)
+                current = []
+            current.append(idx)
+            if len(current) == k:
+                results.append(current)
+                current = []
+
+    if current:
+        results.append(current)
+
+    if not results:
+        raise RuntimeError("Failed to parse any NGT search results.")
+
+    parsed = np.array(results, dtype=np.int64)
+
+    # NGT IDs are 1-based. Convert to 0-based for ANN benchmark ground truth.
+    parsed -= 1
+
+    return parsed, avg_ms if avg_ms is not None else float("nan")
+
+
+def recall_at_k(found: np.ndarray, truth: np.ndarray) -> float:
+    if found.shape != truth.shape:
+        raise ValueError(f"shape mismatch: found={found.shape}, truth={truth.shape}")
+
+    total = found.shape[0] * found.shape[1]
+    hits = 0
+
+    for i in range(found.shape[0]):
+        hits += len(set(found[i].tolist()) & set(truth[i].tolist()))
+
+    return hits / total
+
+
+def main() -> None:
+    if not NGT_BIN.exists():
+        raise SystemExit(f"NGT binary not found: {NGT_BIN}")
+    if not INDEX_PATH.exists():
+        raise SystemExit(f"Index not found: {INDEX_PATH}")
+    if not QUERY_PATH.exists():
+        raise SystemExit(f"Query file not found: {QUERY_PATH}")
+    if not HDF5_PATH.exists():
+        raise SystemExit(f"HDF5 file not found: {HDF5_PATH}")
+
+    truth = load_ground_truth(HDF5_PATH, TOP_K)
+
+    print(f"Loaded ground truth: {truth.shape[0]} queries, top-{TOP_K}")
+    print()
+
+    for epsilon in EPSILONS:
+        output = run_ngt_search(NGT_BIN, INDEX_PATH, QUERY_PATH, TOP_K, epsilon)
+        found, avg_ms = parse_ngt_output(output, TOP_K)
+
+        if found.shape[0] != truth.shape[0]:
+            raise RuntimeError(
+                f"query count mismatch: found={found.shape[0]}, truth={truth.shape[0]}"
+            )
+
+        r = recall_at_k(found, truth)
+        print(f"-e {epsilon}")
+        print(f"  recall@{TOP_K}: {r:.6f}")
+        print(f"  avg_query_ms: {avg_ms:.6f}")
+        print()
+
+
+if __name__ == "__main__":
+    main()

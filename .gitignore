@@ -1,0 +1,14 @@
+/target
+
+/vendors/ngt/
+
+# macOS / editor noise
+.DS_Store
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Generated benchmark indexes
+/benches/indexes/
