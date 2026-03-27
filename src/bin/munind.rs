@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
-use munind::index::NgtIndexType;
-use munind::{NgtDistanceType, NgtIndex, NgtProperty, NgtSearchOptions, ObjectDistance};
+use munind::index::IndexType;
+use munind::{Index, IndexDistanceType, IndexProperty, ObjectDistance, SearchOptions};
 
 #[derive(Parser, Debug)]
 #[command(name = "munind")]
@@ -180,7 +180,7 @@ fn unsupported(command: &str) -> Result<(), String> {
 }
 
 fn create(args: CreateArgs, debug: u32) -> Result<(), String> {
-    let mut property = NgtProperty::new(args.dimension);
+    let mut property = IndexProperty::new(args.dimension);
     property.thread_pool_size = args.thread_pool_size;
     property.edge_size_for_creation = args.edge_size_for_creation;
     property.edge_size_for_search = args.edge_size_for_search;
@@ -211,7 +211,7 @@ fn create(args: CreateArgs, debug: u32) -> Result<(), String> {
         eprintln!("munind: distance_type={:?}", property.distance_type);
     }
 
-    let mut index = NgtIndex::create_graph_and_tree(&args.index, property)?;
+    let mut index = Index::create(&args.index, property)?;
     if let Some(data) = args.data.as_ref() {
         load_vectors_into_index(data, index.property.dimension, &mut index)?;
         index.build_index();
@@ -255,7 +255,7 @@ fn search(args: SearchArgs, debug: u32) -> Result<(), String> {
         let started = Instant::now();
         let results = index.search(
             query,
-            &NgtSearchOptions {
+            &SearchOptions {
                 k: args.size,
                 epsilon: args.epsilon,
                 edge_size: Some(args.edge_size),
@@ -314,8 +314,8 @@ fn info(args: InfoArgs) -> Result<(), String> {
 
 fn export_index(args: TransferArgs) -> Result<(), String> {
     let mut index = open_auto(&args.index)?;
-    if is_ngt_dir(&args.file) || !args.file.extension().is_some() {
-        index.save_as_ngt(&args.file)
+    if is_index_dir(&args.file) || !args.file.extension().is_some() {
+        index.save_as_directory(&args.file)
     } else {
         index.save(Some(&args.file))
     }
@@ -357,23 +357,23 @@ fn rebuild(args: IndexOnlyArgs) -> Result<(), String> {
     save_auto(&mut index, &args.index)
 }
 
-fn open_auto(path: &Path) -> Result<NgtIndex, String> {
-    if is_ngt_dir(path) {
-        NgtIndex::open_ngt(path)
+fn open_auto(path: &Path) -> Result<Index, String> {
+    if is_index_dir(path) {
+        Index::open_directory(path)
     } else {
-        NgtIndex::open(path)
+        Index::open(path)
     }
 }
 
-fn save_auto(index: &mut NgtIndex, path: &Path) -> Result<(), String> {
-    if is_ngt_dir(path) {
-        index.save_as_ngt(path)
+fn save_auto(index: &mut Index, path: &Path) -> Result<(), String> {
+    if is_index_dir(path) {
+        index.save_as_directory(path)
     } else {
         index.save(Some(path))
     }
 }
 
-fn is_ngt_dir(path: &Path) -> bool {
+fn is_index_dir(path: &Path) -> bool {
     path.is_dir() || path.extension().is_none()
 }
 
@@ -414,11 +414,7 @@ fn load_vectors(path: &Path, dimension: usize) -> Result<Vec<Vec<f32>>, String> 
     Ok(vectors)
 }
 
-fn load_vectors_into_index(
-    path: &Path,
-    dimension: usize,
-    index: &mut NgtIndex,
-) -> Result<(), String> {
+fn load_vectors_into_index(path: &Path, dimension: usize, index: &mut Index) -> Result<(), String> {
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
     for (lineno, line) in reader.lines().enumerate() {
@@ -463,80 +459,80 @@ fn print_query_results(query_no: usize, results: &[ObjectDistance], output_mode:
     }
 }
 
-fn parse_distance_type(value: &str) -> Result<NgtDistanceType, String> {
+fn parse_distance_type(value: &str) -> Result<IndexDistanceType, String> {
     match value {
-        "1" => Ok(NgtDistanceType::L1),
-        "2" | "e" => Ok(NgtDistanceType::L2),
-        "c" => Ok(NgtDistanceType::Cosine),
-        "a" => Ok(NgtDistanceType::Angle),
-        "p" => Ok(NgtDistanceType::DotProduct),
+        "1" => Ok(IndexDistanceType::L1),
+        "2" | "e" => Ok(IndexDistanceType::L2),
+        "c" => Ok(IndexDistanceType::Cosine),
+        "a" => Ok(IndexDistanceType::Angle),
+        "p" => Ok(IndexDistanceType::DotProduct),
         other => Err(format!("unsupported distance type: {other}")),
     }
 }
 
-fn parse_index_type(value: &str) -> Result<NgtIndexType, String> {
+fn parse_index_type(value: &str) -> Result<IndexType, String> {
     match value {
-        "t" => Ok(NgtIndexType::GraphAndTree),
-        "g" => Ok(NgtIndexType::Graph),
+        "t" => Ok(IndexType::GraphAndTree),
+        "g" => Ok(IndexType::Graph),
         other => Err(format!("unsupported index type: {other}")),
     }
 }
 
-fn parse_graph_type(value: &str) -> Result<munind::index::NgtGraphType, String> {
+fn parse_graph_type(value: &str) -> Result<munind::index::GraphType, String> {
     match value {
-        "a" => Ok(munind::index::NgtGraphType::ANNG),
-        "k" => Ok(munind::index::NgtGraphType::KNNG),
-        "b" => Ok(munind::index::NgtGraphType::BKNNG),
-        "o" => Ok(munind::index::NgtGraphType::ONNG),
-        "i" => Ok(munind::index::NgtGraphType::IANNG),
-        "d" => Ok(munind::index::NgtGraphType::DNNG),
-        "r" => Ok(munind::index::NgtGraphType::RANNG),
-        "R" => Ok(munind::index::NgtGraphType::RIANNG),
+        "a" => Ok(munind::index::GraphType::ANNG),
+        "k" => Ok(munind::index::GraphType::KNNG),
+        "b" => Ok(munind::index::GraphType::BKNNG),
+        "o" => Ok(munind::index::GraphType::ONNG),
+        "i" => Ok(munind::index::GraphType::IANNG),
+        "d" => Ok(munind::index::GraphType::DNNG),
+        "r" => Ok(munind::index::GraphType::RANNG),
+        "R" => Ok(munind::index::GraphType::RIANNG),
         other => Err(format!("unsupported graph type: {other}")),
     }
 }
 
-fn parse_object_alignment(value: &str) -> Result<munind::index::NgtObjectAlignment, String> {
+fn parse_object_alignment(value: &str) -> Result<munind::index::ObjectAlignment, String> {
     match value {
-        "t" => Ok(munind::index::NgtObjectAlignment::True),
-        "f" => Ok(munind::index::NgtObjectAlignment::False),
+        "t" => Ok(munind::index::ObjectAlignment::True),
+        "f" => Ok(munind::index::ObjectAlignment::False),
         other => Err(format!("unsupported object alignment: {other}")),
     }
 }
 
-fn parse_seed_type(value: &str) -> Result<munind::index::NgtSeedType, String> {
+fn parse_seed_type(value: &str) -> Result<munind::index::SeedType, String> {
     let mode = value.chars().next().unwrap_or('-');
     match mode {
-        'f' => Ok(munind::index::NgtSeedType::FixedNodes),
-        '1' => Ok(munind::index::NgtSeedType::FirstNode),
-        'r' => Ok(munind::index::NgtSeedType::RandomNodes),
-        'l' => Ok(munind::index::NgtSeedType::AllLeafNodes),
-        '-' => Ok(munind::index::NgtSeedType::None),
+        'f' => Ok(munind::index::SeedType::FixedNodes),
+        '1' => Ok(munind::index::SeedType::FirstNode),
+        'r' => Ok(munind::index::SeedType::RandomNodes),
+        'l' => Ok(munind::index::SeedType::AllLeafNodes),
+        '-' => Ok(munind::index::SeedType::None),
         other => Err(format!("unsupported seed type: {other}")),
     }
 }
 
-fn parse_epsilon_type(value: &str) -> Result<munind::index::NgtEpsilonType, String> {
+fn parse_epsilon_type(value: &str) -> Result<munind::index::EpsilonType, String> {
     match value {
-        "q" => Ok(munind::index::NgtEpsilonType::ByQuery),
-        "n" | "-" => Ok(munind::index::NgtEpsilonType::None),
+        "q" => Ok(munind::index::EpsilonType::ByQuery),
+        "n" | "-" => Ok(munind::index::EpsilonType::None),
         other => Err(format!("unsupported epsilon type: {other}")),
     }
 }
 
 fn parse_identical_object_edge_type(
     value: &str,
-) -> Result<munind::index::NgtIdenticalObjectEdgeType, String> {
+) -> Result<munind::index::IdenticalObjectEdgeType, String> {
     match value {
-        "d" => Ok(munind::index::NgtIdenticalObjectEdgeType::DirectedEdge),
-        "u" => Ok(munind::index::NgtIdenticalObjectEdgeType::UndirectedEdge),
-        "-" => Ok(munind::index::NgtIdenticalObjectEdgeType::None),
+        "d" => Ok(munind::index::IdenticalObjectEdgeType::DirectedEdge),
+        "u" => Ok(munind::index::IdenticalObjectEdgeType::UndirectedEdge),
+        "-" => Ok(munind::index::IdenticalObjectEdgeType::None),
         other => Err(format!("unsupported identical-object-edge type: {other}")),
     }
 }
 
 fn apply_leaf_internal_sizes(
-    property: &mut NgtProperty,
+    property: &mut IndexProperty,
     value: Option<&str>,
 ) -> Result<(), String> {
     if let Some(value) = value {
@@ -561,7 +557,10 @@ fn apply_leaf_internal_sizes(
     Ok(())
 }
 
-fn apply_outgoing_incoming(property: &mut NgtProperty, value: Option<&str>) -> Result<(), String> {
+fn apply_outgoing_incoming(
+    property: &mut IndexProperty,
+    value: Option<&str>,
+) -> Result<(), String> {
     if let Some(value) = value {
         let parts: Vec<_> = value.split('x').collect();
         if parts.len() != 2 {
@@ -575,11 +574,11 @@ fn apply_outgoing_incoming(property: &mut NgtProperty, value: Option<&str>) -> R
             .map_err(|e: std::num::ParseIntError| e.to_string())?;
     } else if matches!(
         property.graph_type,
-        munind::index::NgtGraphType::ANNG
-            | munind::index::NgtGraphType::ONNG
-            | munind::index::NgtGraphType::IANNG
-            | munind::index::NgtGraphType::RANNG
-            | munind::index::NgtGraphType::RIANNG
+        munind::index::GraphType::ANNG
+            | munind::index::GraphType::ONNG
+            | munind::index::GraphType::IANNG
+            | munind::index::GraphType::RANNG
+            | munind::index::GraphType::RIANNG
     ) {
         property.outgoing_edge = 10;
         property.incoming_edge = 100;
@@ -587,7 +586,7 @@ fn apply_outgoing_incoming(property: &mut NgtProperty, value: Option<&str>) -> R
     Ok(())
 }
 
-fn apply_insertion_order(property: &mut NgtProperty, value: Option<&str>) -> Result<(), String> {
+fn apply_insertion_order(property: &mut IndexProperty, value: Option<&str>) -> Result<(), String> {
     if let Some(value) = value {
         let parts: Vec<_> = value.split(':').collect();
         match parts.as_slice() {
@@ -610,7 +609,7 @@ fn apply_insertion_order(property: &mut NgtProperty, value: Option<&str>) -> Res
     Ok(())
 }
 
-fn apply_object_type(property: &mut NgtProperty, value: &str) -> Result<(), String> {
+fn apply_object_type(property: &mut IndexProperty, value: &str) -> Result<(), String> {
     match value {
         "f" => {
             property.object_type = munind::object_space::ObjectType::Float;

@@ -9,33 +9,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 
 use crate::graph::{NeighborhoodGraph, SearchContainer};
+use crate::mmap_index::{GRAPH_MAGIC, OBJECT_HEADER_SIZE, OBJECT_MAGIC};
 use crate::node::ObjectDistance;
 use crate::object_space::{DistanceType, ObjectSpace, ObjectType};
 use crate::tree::DvpTree;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtIndexType {
+pub enum IndexType {
     None,
     GraphAndTree,
     Graph,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtDatabaseType {
+pub enum DatabaseType {
     None,
     Memory,
     MemoryMappedFile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtObjectAlignment {
+pub enum ObjectAlignment {
     None,
     True,
     False,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtGraphType {
+pub enum GraphType {
     None,
     ANNG,
     KNNG,
@@ -48,7 +49,7 @@ pub enum NgtGraphType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtSeedType {
+pub enum SeedType {
     None,
     RandomNodes,
     FixedNodes,
@@ -57,21 +58,21 @@ pub enum NgtSeedType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtEpsilonType {
+pub enum EpsilonType {
     None,
     ByQuery,
     ResultSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NgtIdenticalObjectEdgeType {
+pub enum IdenticalObjectEdgeType {
     None,
     DirectedEdge,
     UndirectedEdge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum NgtDistanceType {
+pub enum IndexDistanceType {
     L1,
     L2,
     Cosine,
@@ -79,27 +80,27 @@ pub enum NgtDistanceType {
     DotProduct,
 }
 
-impl Into<DistanceType> for NgtDistanceType {
+impl Into<DistanceType> for IndexDistanceType {
     fn into(self) -> DistanceType {
         match self {
-            NgtDistanceType::L1 => DistanceType::L1,
-            NgtDistanceType::L2 => DistanceType::L2,
-            NgtDistanceType::Cosine => DistanceType::Cosine,
-            NgtDistanceType::Angle => DistanceType::Angle,
-            NgtDistanceType::DotProduct => DistanceType::DotProduct,
+            IndexDistanceType::L1 => DistanceType::L1,
+            IndexDistanceType::L2 => DistanceType::L2,
+            IndexDistanceType::Cosine => DistanceType::Cosine,
+            IndexDistanceType::Angle => DistanceType::Angle,
+            IndexDistanceType::DotProduct => DistanceType::DotProduct,
         }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NgtProperty {
+pub struct IndexProperty {
     pub dimension: usize,
     pub thread_pool_size: usize,
-    pub distance_type: NgtDistanceType,
+    pub distance_type: IndexDistanceType,
     pub object_type: ObjectType,
-    pub index_type: NgtIndexType,
-    pub database_type: NgtDatabaseType,
-    pub object_alignment: NgtObjectAlignment,
+    pub index_type: IndexType,
+    pub database_type: DatabaseType,
+    pub object_alignment: ObjectAlignment,
     pub path_adjustment_interval: isize,
     pub prefetch_offset: isize,
     pub prefetch_size: isize,
@@ -117,29 +118,29 @@ pub struct NgtProperty {
     pub edge_size_limit_for_creation: usize,
     pub insertion_radius_coefficient: f64,
     pub seed_size: usize,
-    pub seed_type: NgtSeedType,
+    pub seed_type: SeedType,
     pub truncation_thread_pool_size: usize,
     pub batch_size_for_creation: usize,
-    pub graph_type: NgtGraphType,
+    pub graph_type: GraphType,
     pub dynamic_edge_size_base: usize,
     pub dynamic_edge_size_rate: usize,
     pub build_time_limit: f32,
     pub outgoing_edge: usize,
     pub incoming_edge: usize,
-    pub epsilon_type: NgtEpsilonType,
-    pub identical_object_edge_type: NgtIdenticalObjectEdgeType,
+    pub epsilon_type: EpsilonType,
+    pub identical_object_edge_type: IdenticalObjectEdgeType,
 }
 
-impl NgtProperty {
+impl IndexProperty {
     pub fn new(dimension: usize) -> Self {
         Self {
             dimension,
             thread_pool_size: 32,
-            distance_type: NgtDistanceType::L2,
+            distance_type: IndexDistanceType::L2,
             object_type: ObjectType::Float,
-            index_type: NgtIndexType::GraphAndTree,
-            database_type: NgtDatabaseType::Memory,
-            object_alignment: NgtObjectAlignment::False,
+            index_type: IndexType::GraphAndTree,
+            database_type: DatabaseType::Memory,
+            object_alignment: ObjectAlignment::False,
             path_adjustment_interval: 0,
             prefetch_offset: 0,
             prefetch_size: 0,
@@ -157,37 +158,37 @@ impl NgtProperty {
             edge_size_limit_for_creation: 5,
             insertion_radius_coefficient: 1.1,
             seed_size: 10,
-            seed_type: NgtSeedType::None,
+            seed_type: SeedType::None,
             truncation_thread_pool_size: 8,
             batch_size_for_creation: 200,
-            graph_type: NgtGraphType::ANNG,
+            graph_type: GraphType::ANNG,
             dynamic_edge_size_base: 30,
             dynamic_edge_size_rate: 20,
             build_time_limit: 0.0,
             outgoing_edge: 10,
             incoming_edge: 80,
-            epsilon_type: NgtEpsilonType::None,
-            identical_object_edge_type: NgtIdenticalObjectEdgeType::None,
+            epsilon_type: EpsilonType::None,
+            identical_object_edge_type: IdenticalObjectEdgeType::None,
         }
     }
 
-    pub fn set_distance_type(&mut self, dt: NgtDistanceType) {
+    pub fn set_distance_type(&mut self, dt: IndexDistanceType) {
         self.distance_type = dt;
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct NgtSearchOptions {
+pub struct SearchOptions {
     pub k: usize,
     pub epsilon: f32,
     pub edge_size: Option<isize>,
 }
 
-struct NgtRandom {
+struct IndexRandom {
     state: u32,
 }
 
-impl NgtRandom {
+impl IndexRandom {
     fn new(seed: u32) -> Self {
         Self { state: seed.max(1) }
     }
@@ -204,8 +205,8 @@ impl NgtRandom {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct NgtIndex {
-    pub property: NgtProperty,
+pub struct Index {
+    pub property: IndexProperty,
     pub objects: Vec<Vec<f32>>,
     #[serde(skip)]
     pub object_space: Option<ObjectSpace>,
@@ -215,19 +216,16 @@ pub struct NgtIndex {
 }
 
 #[derive(Serialize)]
-struct SerializableNgtIndex<'a> {
-    property: &'a NgtProperty,
+struct SerializableIndex<'a> {
+    property: &'a IndexProperty,
     objects: Vec<Vec<f32>>,
     graph: &'a NeighborhoodGraph,
     tree: &'a Option<DvpTree>,
     path: &'a String,
 }
 
-impl NgtIndex {
-    pub fn create_graph_and_tree<P: AsRef<Path>>(
-        path: P,
-        property: NgtProperty,
-    ) -> Result<Self, String> {
+impl Index {
+    pub fn create<P: AsRef<Path>>(path: P, property: IndexProperty) -> Result<Self, String> {
         let object_space = ObjectSpace::new(
             property.dimension,
             property.distance_type.into(),
@@ -248,7 +246,7 @@ impl NgtIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let reader = BufReader::new(file);
-        let mut index: NgtIndex = bincode::deserialize_from(reader).map_err(|e| e.to_string())?;
+        let mut index: Index = bincode::deserialize_from(reader).map_err(|e| e.to_string())?;
 
         // Reconstruct object_space correctly
         let mut object_space = ObjectSpace::new(
@@ -292,7 +290,7 @@ impl NgtIndex {
         Ok(())
     }
 
-    pub fn save_as_ngt<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+    pub fn save_as_directory<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
         let path = path.as_ref();
         fs::create_dir_all(path).map_err(|e| e.to_string())?;
 
@@ -309,7 +307,18 @@ impl NgtIndex {
         writer.flush().map_err(|e| e.to_string())
     }
 
-    pub fn open_ngt<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+    pub fn save_as_mmap<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let path = path.as_ref();
+        fs::create_dir_all(path).map_err(|e| e.to_string())?;
+
+        self.save_property_file(path.join("prf"))?;
+        self.save_mmap_objects(path.join("obj.mmap"))?;
+        self.save_mmap_graph(path.join("grp.mmap"))?;
+        self.serialize_into_file(path.join("tre.bin"), &self.tree)?;
+        Ok(())
+    }
+
+    pub fn open_directory<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
         let property = Self::load_property_file(path.join("prf"))?;
         let objects: Vec<Vec<f32>> = Self::deserialize_from_file(path.join("obj"))?;
@@ -346,7 +355,7 @@ impl NgtIndex {
         bincode::deserialize_from(reader).map_err(|e| e.to_string())
     }
 
-    fn save_property_file<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+    pub(crate) fn save_property_file<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
         let mut lines = Vec::new();
         lines.push(("AccuracyTable", "".to_string()));
         lines.push((
@@ -357,9 +366,9 @@ impl NgtIndex {
         lines.push((
             "DatabaseType",
             match self.property.database_type {
-                NgtDatabaseType::None => "None",
-                NgtDatabaseType::Memory => "Memory",
-                NgtDatabaseType::MemoryMappedFile => "MemoryMappedFile",
+                DatabaseType::None => "None",
+                DatabaseType::Memory => "Memory",
+                DatabaseType::MemoryMappedFile => "MemoryMappedFile",
             }
             .to_string(),
         ));
@@ -367,11 +376,11 @@ impl NgtIndex {
         lines.push((
             "DistanceType",
             match self.property.distance_type {
-                NgtDistanceType::L1 => "L1",
-                NgtDistanceType::L2 => "L2",
-                NgtDistanceType::Cosine => "Cosine",
-                NgtDistanceType::Angle => "Angle",
-                NgtDistanceType::DotProduct => "DotProduct",
+                IndexDistanceType::L1 => "L1",
+                IndexDistanceType::L2 => "L2",
+                IndexDistanceType::Cosine => "Cosine",
+                IndexDistanceType::Angle => "Angle",
+                IndexDistanceType::DotProduct => "DotProduct",
             }
             .to_string(),
         ));
@@ -406,33 +415,33 @@ impl NgtIndex {
         lines.push((
             "EpsilonType",
             match self.property.epsilon_type {
-                NgtEpsilonType::None => "None",
-                NgtEpsilonType::ByQuery => "ByQuery",
-                NgtEpsilonType::ResultSize => "ResultSize",
+                EpsilonType::None => "None",
+                EpsilonType::ByQuery => "ByQuery",
+                EpsilonType::ResultSize => "ResultSize",
             }
             .to_string(),
         ));
         lines.push((
             "GraphType",
             match self.property.graph_type {
-                NgtGraphType::None => "None",
-                NgtGraphType::ANNG => "ANNG",
-                NgtGraphType::KNNG => "KNNG",
-                NgtGraphType::BKNNG => "BKNNG",
-                NgtGraphType::ONNG => "ONNG",
-                NgtGraphType::IANNG => "IANNG",
-                NgtGraphType::DNNG => "DNNG",
-                NgtGraphType::RANNG => "RANNG",
-                NgtGraphType::RIANNG => "RIANNG",
+                GraphType::None => "None",
+                GraphType::ANNG => "ANNG",
+                GraphType::KNNG => "KNNG",
+                GraphType::BKNNG => "BKNNG",
+                GraphType::ONNG => "ONNG",
+                GraphType::IANNG => "IANNG",
+                GraphType::DNNG => "DNNG",
+                GraphType::RANNG => "RANNG",
+                GraphType::RIANNG => "RIANNG",
             }
             .to_string(),
         ));
         lines.push((
             "IdenticalObjectEdgeType",
             match self.property.identical_object_edge_type {
-                NgtIdenticalObjectEdgeType::None => "None",
-                NgtIdenticalObjectEdgeType::DirectedEdge => "DirectedEdge",
-                NgtIdenticalObjectEdgeType::UndirectedEdge => "UndirectedEdge",
+                IdenticalObjectEdgeType::None => "None",
+                IdenticalObjectEdgeType::DirectedEdge => "DirectedEdge",
+                IdenticalObjectEdgeType::UndirectedEdge => "UndirectedEdge",
             }
             .to_string(),
         ));
@@ -444,9 +453,9 @@ impl NgtIndex {
         lines.push((
             "IndexType",
             match self.property.index_type {
-                NgtIndexType::None => "None",
-                NgtIndexType::GraphAndTree => "GraphAndTree",
-                NgtIndexType::Graph => "Graph",
+                IndexType::None => "None",
+                IndexType::GraphAndTree => "GraphAndTree",
+                IndexType::Graph => "Graph",
             }
             .to_string(),
         ));
@@ -465,9 +474,9 @@ impl NgtIndex {
         lines.push((
             "ObjectAlignment",
             match self.property.object_alignment {
-                NgtObjectAlignment::None => "None",
-                NgtObjectAlignment::True => "True",
-                NgtObjectAlignment::False => "False",
+                ObjectAlignment::None => "None",
+                ObjectAlignment::True => "True",
+                ObjectAlignment::False => "False",
             }
             .to_string(),
         ));
@@ -505,11 +514,11 @@ impl NgtIndex {
         lines.push((
             "SeedType",
             match self.property.seed_type {
-                NgtSeedType::None => "None",
-                NgtSeedType::RandomNodes => "RandomNodes",
-                NgtSeedType::FixedNodes => "FixedNodes",
-                NgtSeedType::FirstNode => "FirstNode",
-                NgtSeedType::AllLeafNodes => "AllLeafNodes",
+                SeedType::None => "None",
+                SeedType::RandomNodes => "RandomNodes",
+                SeedType::FixedNodes => "FixedNodes",
+                SeedType::FirstNode => "FirstNode",
+                SeedType::AllLeafNodes => "AllLeafNodes",
             }
             .to_string(),
         ));
@@ -529,10 +538,10 @@ impl NgtIndex {
         writer.flush().map_err(|e| e.to_string())
     }
 
-    fn load_property_file<P: AsRef<Path>>(path: P) -> Result<NgtProperty, String> {
+    pub(crate) fn load_property_file<P: AsRef<Path>>(path: P) -> Result<IndexProperty, String> {
         let file = File::open(path).map_err(|e| e.to_string())?;
         let reader = BufReader::new(file);
-        let mut property = NgtProperty::new(0);
+        let mut property = IndexProperty::new(0);
         for line in reader.lines() {
             let line = line.map_err(|e| e.to_string())?;
             if line.trim().is_empty() {
@@ -554,11 +563,11 @@ impl NgtIndex {
                 }
                 "DistanceType" => {
                     property.distance_type = match value {
-                        "L1" => NgtDistanceType::L1,
-                        "L2" => NgtDistanceType::L2,
-                        "Cosine" => NgtDistanceType::Cosine,
-                        "Angle" => NgtDistanceType::Angle,
-                        "DotProduct" => NgtDistanceType::DotProduct,
+                        "L1" => IndexDistanceType::L1,
+                        "L2" => IndexDistanceType::L2,
+                        "Cosine" => IndexDistanceType::Cosine,
+                        "Angle" => IndexDistanceType::Angle,
+                        "DotProduct" => IndexDistanceType::DotProduct,
                         other => return Err(format!("Unsupported DistanceType: {other}")),
                     }
                 }
@@ -584,23 +593,23 @@ impl NgtIndex {
                 }
                 "GraphType" => {
                     property.graph_type = match value {
-                        "ANNG" => NgtGraphType::ANNG,
-                        "KNNG" => NgtGraphType::KNNG,
-                        "BKNNG" => NgtGraphType::BKNNG,
-                        "ONNG" => NgtGraphType::ONNG,
-                        "IANNG" => NgtGraphType::IANNG,
-                        "DNNG" => NgtGraphType::DNNG,
-                        "RANNG" => NgtGraphType::RANNG,
-                        "RIANNG" => NgtGraphType::RIANNG,
-                        "None" => NgtGraphType::None,
+                        "ANNG" => GraphType::ANNG,
+                        "KNNG" => GraphType::KNNG,
+                        "BKNNG" => GraphType::BKNNG,
+                        "ONNG" => GraphType::ONNG,
+                        "IANNG" => GraphType::IANNG,
+                        "DNNG" => GraphType::DNNG,
+                        "RANNG" => GraphType::RANNG,
+                        "RIANNG" => GraphType::RIANNG,
+                        "None" => GraphType::None,
                         other => return Err(format!("Unsupported GraphType: {other}")),
                     }
                 }
                 "IndexType" => {
                     property.index_type = match value {
-                        "GraphAndTree" => NgtIndexType::GraphAndTree,
-                        "Graph" => NgtIndexType::Graph,
-                        "None" => NgtIndexType::None,
+                        "GraphAndTree" => IndexType::GraphAndTree,
+                        "Graph" => IndexType::Graph,
+                        "None" => IndexType::None,
                         other => return Err(format!("Unsupported IndexType: {other}")),
                     }
                 }
@@ -651,7 +660,7 @@ impl NgtIndex {
         graph.edges = vec![Vec::new(); num_objects];
 
         self.graph = graph;
-        self.tree = if matches!(self.property.index_type, NgtIndexType::GraphAndTree) {
+        self.tree = if matches!(self.property.index_type, IndexType::GraphAndTree) {
             Some(DvpTree::new(
                 self.property.leaf_node_size,
                 self.property.internal_children_size,
@@ -676,7 +685,7 @@ impl NgtIndex {
     pub fn search(
         &self,
         query: &[f32],
-        options: &NgtSearchOptions,
+        options: &SearchOptions,
     ) -> Result<Vec<ObjectDistance>, String> {
         let mut sc = SearchContainer {
             object: query,
@@ -732,7 +741,7 @@ impl NgtIndex {
     }
 
     fn get_seeds(&self, prepared_query: &[f32], k: usize) -> Result<Vec<ObjectDistance>, String> {
-        if matches!(self.property.index_type, NgtIndexType::GraphAndTree) {
+        if matches!(self.property.index_type, IndexType::GraphAndTree) {
             let tree_seeds = self.get_seeds_from_tree(prepared_query, k)?;
             if !tree_seeds.is_empty() {
                 return Ok(tree_seeds);
@@ -782,7 +791,7 @@ impl NgtIndex {
 
         let mut seeds = Vec::new();
         match self.property.seed_type {
-            NgtSeedType::FixedNodes => {
+            SeedType::FixedNodes => {
                 for id in 1..=self
                     .effective_seed_count(self.property.edge_size_for_creation)
                     .min(repository_size)
@@ -793,7 +802,7 @@ impl NgtIndex {
                     });
                 }
             }
-            NgtSeedType::FirstNode => {
+            SeedType::FirstNode => {
                 seeds.push(ObjectDistance {
                     id: 1,
                     distance: 0.0,
@@ -825,32 +834,32 @@ impl NgtIndex {
     ) {
         if seeds.is_empty()
             || use_all_nodes_in_leaf
-            || matches!(self.property.seed_type, NgtSeedType::AllLeafNodes)
+            || matches!(self.property.seed_type, SeedType::AllLeafNodes)
         {
             return;
         }
 
         match self.property.seed_type {
-            NgtSeedType::None => {
+            SeedType::None => {
                 let seed_size = self.effective_seed_count(k).min(k.max(1));
                 if seeds.len() > seed_size {
                     self.random_thin_seeds(seeds, seed_size, true);
                 }
             }
-            NgtSeedType::FixedNodes => {
+            SeedType::FixedNodes => {
                 let seed_size = self.effective_seed_count(k);
                 if seeds.len() > seed_size {
                     seeds.truncate(seed_size);
                 }
             }
-            NgtSeedType::RandomNodes => {
+            SeedType::RandomNodes => {
                 let seed_size = self.effective_seed_count(k);
                 if seeds.len() > seed_size {
                     self.random_thin_seeds(seeds, seed_size, false);
                 }
             }
-            NgtSeedType::FirstNode => seeds.truncate(1),
-            NgtSeedType::AllLeafNodes => {}
+            SeedType::FirstNode => seeds.truncate(1),
+            SeedType::AllLeafNodes => {}
         }
     }
 
@@ -875,7 +884,7 @@ impl NgtIndex {
         if seeds.len() <= seed_size {
             return;
         }
-        let mut rng = NgtRandom::new(if deterministic {
+        let mut rng = IndexRandom::new(if deterministic {
             seeds[0].id
         } else {
             rand::random::<u32>()
@@ -906,7 +915,7 @@ impl NgtIndex {
         if id <= 1 {
             return Vec::new();
         }
-        if matches!(self.property.index_type, NgtIndexType::GraphAndTree) {
+        if matches!(self.property.index_type, IndexType::GraphAndTree) {
             if let (Some(tree), Some(object_space)) = (&self.tree, &self.object_space) {
                 if !tree.is_empty() {
                     if let Some(query_object) = self.object(id) {
@@ -930,7 +939,7 @@ impl NgtIndex {
         let mut seeds = Vec::new();
         let max_id = id - 1;
         match self.property.seed_type {
-            NgtSeedType::FixedNodes => {
+            SeedType::FixedNodes => {
                 for seed_id in 1..=self
                     .effective_seed_count(self.property.edge_size_for_creation)
                     .min(max_id)
@@ -941,7 +950,7 @@ impl NgtIndex {
                     });
                 }
             }
-            NgtSeedType::FirstNode => seeds.push(ObjectDistance {
+            SeedType::FirstNode => seeds.push(ObjectDistance {
                 id: 1,
                 distance: 0.0,
             }),
@@ -1033,7 +1042,7 @@ impl NgtIndex {
         while start_id <= num_objects {
             let end_id = (start_id + batch_size - 1).min(num_objects);
             let ids: Vec<usize> = (start_id..=end_id).collect();
-            let this: &NgtIndex = &*self;
+            let this: &Index = &*self;
             let mut batch_results: Vec<(usize, Vec<ObjectDistance>)> = ids
                 .par_iter()
                 .map(|&id| (id, this.search_neighbors_for_insertion(id)))
@@ -1049,7 +1058,7 @@ impl NgtIndex {
 
     fn search_neighbors_for_insertion(&self, id: usize) -> Vec<ObjectDistance> {
         match self.property.graph_type {
-            NgtGraphType::ANNG | NgtGraphType::IANNG | NgtGraphType::RANNG => {
+            GraphType::ANNG | GraphType::IANNG | GraphType::RANNG => {
                 self.search_for_nng_insertion(id)
             }
             _ => self.search_for_knng_insertion(id),
@@ -1059,11 +1068,11 @@ impl NgtIndex {
     fn enrich_batch_results(&self, batch_results: &mut [(usize, Vec<ObjectDistance>)]) {
         if !matches!(
             self.property.graph_type,
-            NgtGraphType::ANNG
-                | NgtGraphType::IANNG
-                | NgtGraphType::ONNG
-                | NgtGraphType::RANNG
-                | NgtGraphType::RIANNG
+            GraphType::ANNG
+                | GraphType::IANNG
+                | GraphType::ONNG
+                | GraphType::RANNG
+                | GraphType::RIANNG
         ) {
             return;
         }
@@ -1141,10 +1150,10 @@ impl NgtIndex {
         neighbors.dedup_by(|a, b| a.id == b.id);
 
         match self.property.graph_type {
-            NgtGraphType::KNNG => {
+            GraphType::KNNG => {
                 self.graph.edges[id - 1] = neighbors;
             }
-            NgtGraphType::BKNNG => {
+            GraphType::BKNNG => {
                 let mut merged = self.graph.edges[id - 1].clone();
                 merged.extend(neighbors.iter().copied());
                 merged.sort_by(|a, b| {
@@ -1166,7 +1175,7 @@ impl NgtIndex {
                     );
                 }
             }
-            NgtGraphType::ONNG => {
+            GraphType::ONNG => {
                 for neighbor in neighbors.iter().take(self.property.incoming_edge) {
                     let _ = self.graph.add_edge(
                         (neighbor.id - 1) as usize,
@@ -1183,11 +1192,11 @@ impl NgtIndex {
                 }
                 self.graph.edges[id - 1] = outgoing;
             }
-            NgtGraphType::ANNG | NgtGraphType::RANNG => {
-                if matches!(self.property.graph_type, NgtGraphType::ANNG)
+            GraphType::ANNG | GraphType::RANNG => {
+                if matches!(self.property.graph_type, GraphType::ANNG)
                     && !matches!(
                         self.property.identical_object_edge_type,
-                        NgtIdenticalObjectEdgeType::None
+                        IdenticalObjectEdgeType::None
                     )
                 {
                     self.filter_duplicates_in_results(&mut neighbors);
@@ -1207,7 +1216,7 @@ impl NgtIndex {
                     );
                 }
             }
-            NgtGraphType::IANNG | NgtGraphType::RIANNG => {
+            GraphType::IANNG | GraphType::RIANNG => {
                 self.graph.edges[id - 1] = neighbors.clone();
                 let reverse_limit = self
                     .property
@@ -1304,7 +1313,7 @@ impl NgtIndex {
     ) -> bool {
         if matches!(
             self.property.identical_object_edge_type,
-            NgtIdenticalObjectEdgeType::None
+            IdenticalObjectEdgeType::None
         ) || neighbors.is_empty()
             || neighbors[0].distance != 0.0
         {
@@ -1346,7 +1355,7 @@ impl NgtIndex {
 
         self.graph.edges[id - 1] = if matches!(
             self.property.identical_object_edge_type,
-            NgtIdenticalObjectEdgeType::UndirectedEdge
+            IdenticalObjectEdgeType::UndirectedEdge
         ) {
             vec![ObjectDistance {
                 id: max_id,
@@ -1398,13 +1407,89 @@ impl NgtIndex {
         }
     }
 
-    fn serializable_snapshot(&self) -> SerializableNgtIndex<'_> {
-        SerializableNgtIndex {
+    fn serializable_snapshot(&self) -> SerializableIndex<'_> {
+        SerializableIndex {
             property: &self.property,
             objects: self.materialize_objects(),
             graph: &self.graph,
             tree: &self.tree,
             path: &self.path,
         }
+    }
+
+    fn save_mmap_objects<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let file = File::create(path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        let objects = self.materialize_objects();
+        let object_count = objects.len() as u64;
+        writer.write_all(OBJECT_MAGIC).map_err(|e| e.to_string())?;
+        writer
+            .write_all(&object_count.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&(self.property.dimension as u64).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        let max_magnitude = self
+            .object_space
+            .as_ref()
+            .map(|object_space| object_space.max_magnitude)
+            .unwrap_or(-1.0);
+        writer
+            .write_all(&max_magnitude.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&0u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&0u32.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        debug_assert_eq!(OBJECT_HEADER_SIZE, 36);
+        for object in objects {
+            for value in object {
+                writer
+                    .write_all(&value.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        writer.flush().map_err(|e| e.to_string())
+    }
+
+    fn save_mmap_graph<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let file = File::create(path).map_err(|e| e.to_string())?;
+        let mut writer = BufWriter::new(file);
+        let node_count = self.graph.edges.len() as u64;
+        let mut offsets = Vec::with_capacity(self.graph.edges.len() + 1);
+        offsets.push(0u64);
+        let mut edge_total = 0u64;
+        for edges in &self.graph.edges {
+            edge_total += edges.len() as u64;
+            offsets.push(edge_total);
+        }
+        writer.write_all(GRAPH_MAGIC).map_err(|e| e.to_string())?;
+        writer
+            .write_all(&node_count.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&edge_total.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        writer
+            .write_all(&0u64.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        for offset in offsets {
+            writer
+                .write_all(&offset.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        for edges in &self.graph.edges {
+            for edge in edges {
+                writer
+                    .write_all(&edge.id.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+                writer
+                    .write_all(&edge.distance.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        writer.flush().map_err(|e| e.to_string())
     }
 }

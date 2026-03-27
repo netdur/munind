@@ -1,31 +1,77 @@
-# Discrepancies between Munind & NGT Search Implementations
+# Mmap-Native Index Plan
 
-The lower recall (0.6206 vs 0.6282) and higher query latency (0.43ms vs 0.27ms) of the Rust `munind` implementation compared to the original C++ NGT baseline stems directly from three primary discrepancies in how seeds are selected from the graph and tree, as well as minor queuing differences.
+The project is past the phase where strict NGT internal parity is the goal. NGT was useful as a sanity check for correctness and performance, but the next direction should be a Rust-native storage and search design that keeps the current quality and speed while improving startup cost, memory usage, and code structure.
 
-## 1. Single Path Greedy Leaf Search vs Beam Search
-- **C++ NGT:** During `SearchLeaf` mode, the C++ tree search only follows the single closest branch at each step (greedy traversal), explicitly ignoring other boundaries and avoiding the `pending` queue entirely. It lands on exactly **one** leaf node.
-- **Rust Munind:** `nearest_leaves_for_query` does a full branch-and-bound exploration using `pending` queues and searches up to `internal_children_size` leaves (default 5). This fetches and checks many more pivots, contributing significantly to the slower query latency.
+## Goals
 
-## 2. Seed Selection and Random Thinning
-- **C++ NGT:** After finding the single nearest leaf, NGT selects seeds using a deterministic fallback to random thinning. If the leaf contains 100 items and we need 10 seeds, NGT applies an in-place seeded random shuffle (`srand(seeds[0].id)`) to pick 10 random nodes scattered across the leaf cluster. This provides maximum spatial diversity for the graph search.
-- **Rust Munind:** Rather than randomly selecting, Rust sorts the objects inside the nearest leaves by their distance to the leaf's pivot, and truncates the list. This forces the graph search to start from a group of seeds mathematically clamped to the absolute center of a single cluster. This lack of spatial diversity directly causes the graph traversal to get trapped in local minima, resulting in the lower recall.
+- Replace serde-heavy load paths with mmap-backed read paths.
+- Keep the mutable in-memory builder for create-time simplicity.
+- Finalize built indexes into flat files that are efficient to map and search.
+- Preserve current search behavior and property semantics where they are already good enough.
+- Avoid porting NGT's shared-memory allocator design.
 
-## 3. Seed Size Dynamic Scaling
-- **C++ NGT:** When `seedSize` configuration is 0 (the default), C++ dynamically falls back to taking exactly `k` (the top-k parameter requested by the user query).
-- **Rust Munind:** When `seedSize` is 0, Rust falls back to `edge_size_for_creation` (which defaults to 10). While the benchmark runs with `k=10`, if the user ever queries for `k=100`, Rust will dramatically under-seed the search starting point.
+## Architecture
 
-## Proposed Changes
+### 1. Builder vs Reader split
+- `Index` remains the mutable builder and reference implementation.
+- A new `MmapIndex` becomes the read-only search path.
+- The builder owns `Vec`-based objects, graph, and tree during construction.
+- Finalization writes flat files that `MmapIndex` can open with `memmap2`.
 
-### [MODIFY] `src/tree.rs`
-- Add a new `greedy_leaf_for_query` function that rigorously follows the C++ NGT single path greedy logic for `SearchLeaf`.
+### 2. Flat on-disk layout
+- Keep the existing `prf` property file as human-readable metadata.
+- Store objects in a dedicated flat binary file with:
+  - magic/version
+  - object count
+  - dimension
+  - max magnitude for dot-product distance
+  - contiguous normalized vectors
+- Store graph adjacency in a dedicated flat binary file with:
+  - magic/version
+  - node count
+  - edge count
+  - adjacency offsets
+  - packed `(id, distance)` edge records
+- Keep the current tree as a sidecar file initially.
+  - This preserves current GraphAndTree behavior while avoiding an all-at-once tree rewrite.
 
-### [MODIFY] `src/index.rs`
-- Update `effective_seed_count` to accept `k` as a parameter and fallback to it when `property.seed_size == 0`.
-- Update `get_seeds_from_tree` to fetch the single greedy leaf using `greedy_leaf_for_query`.
-- Update `thin_tree_seeds` to replicate NGT's `srand` deterministic random thinning logic using the target's first seed ID to correctly thin data down to `seedSize`.
+### 3. Search path
+- `MmapIndex::search` should:
+  - prepare the query with the same distance semantics as the builder
+  - get initial seeds from the tree when available
+  - traverse graph edges directly from mapped adjacency bytes
+  - read object vectors directly from mapped object bytes
+- `MmapIndex::linear_search` should provide a correctness baseline over mapped objects.
 
-### [MODIFY] `src/graph.rs`
-- Minor update to alignment for `SearchContainer` and `search` loop logic, verifying any remaining differences.
+## Phase Breakdown
 
-## User Action Required
-Please approve this plan so that I can implement these modifications to perfectly align Rust's search implementation with C++ NGT to close the recall and latency gap.
+### Phase 1
+- Add `memmap2`.
+- Define the object and graph flat file formats.
+- Implement `Index::save_as_mmap`.
+- Implement `MmapIndex::open`.
+- Implement mmap-backed object access, graph adjacency access, `linear_search`, and graph search.
+- Reuse the existing tree as a serialized sidecar.
+
+Status: implemented.
+
+### Phase 2
+- Add CLI support for opening/searching mmap indexes directly.
+- Add benchmarking to compare mmap open/search against the current in-memory load path.
+- Verify recall parity between `Index` and `MmapIndex` on the same built index.
+
+Status: pending.
+
+### Phase 3
+- Replace the serialized tree sidecar with a flat mmap-friendly tree format.
+- Remove unnecessary object duplication from open/load paths.
+- Consider explicit SIMD/NEON-friendly alignment in the finalized flat files.
+
+Status: pending.
+
+## Constraints
+
+- Do not chase native NGT binary compatibility.
+- Do not port NGT's shared-memory allocator.
+- Prefer flat arrays and borrowed slices over pointer-rich layouts.
+- Keep the mutable builder code path stable while introducing the mmap reader alongside it.
