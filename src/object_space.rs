@@ -28,7 +28,7 @@ pub enum ObjectType {
 
 // NGT reserves object ID 0, so the repository keeps a sentinel entry at index 0.
 pub struct ObjectRepository {
-    pub objects: Vec<Vec<f32>>,
+    objects: Vec<Vec<f32>>,
 }
 
 impl ObjectRepository {
@@ -38,15 +38,11 @@ impl ObjectRepository {
         }
     }
 
-    pub fn insert(&mut self, id: usize, obj: Vec<f32>) -> usize {
-        if id >= self.objects.len() {
-            self.objects.resize(id + 1, Vec::new());
-        }
-        self.objects[id] = obj;
-        id
+    pub fn len(&self) -> usize {
+        self.objects.len()
     }
 
-    pub fn push(&mut self, obj: Vec<f32>) -> usize {
+    pub fn push_float(&mut self, obj: Vec<f32>) -> usize {
         let id = self.objects.len();
         self.objects.push(obj);
         id
@@ -67,8 +63,8 @@ impl ObjectRepository {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.objects.len()
+    pub fn materialize(&self) -> Vec<Vec<f32>> {
+        self.objects.iter().skip(1).cloned().collect()
     }
 }
 
@@ -170,12 +166,12 @@ impl ObjectSpace {
             ));
         }
         if matches!(self.distance_type, DistanceType::DotProduct) {
-            let magnitude = PrimitiveComparator::compare_dot_product_f32(&obj, &obj) as f32;
+            let magnitude = PrimitiveComparator::compare_dot_product_f32(&obj, &obj);
             if magnitude > self.max_magnitude {
                 self.max_magnitude = magnitude;
             }
         }
-        Ok(self.repository.push(obj))
+        Ok(self.repository.push_float(obj))
     }
 
     pub fn compare(&self, a: &[f32], b: &[f32]) -> f32 {
@@ -212,9 +208,23 @@ impl ObjectSpace {
                 };
                 magnitude - PrimitiveComparator::compare_dot_product_f32(a, b)
             }
-            // Defaulting to L2 if not implemented yet
             _ => self.compare_l2(a, b),
         }
+    }
+
+    pub fn compare_to_id(&self, query: &[f32], id: usize) -> Option<f32> {
+        self.get_object(id)
+            .map(|object| self.compare(query, object))
+    }
+
+    pub fn compare_ids(&self, left: usize, right: usize) -> Option<f32> {
+        let left_object = self.get_object(left)?;
+        let right_object = self.get_object(right)?;
+        Some(self.compare(left_object, right_object))
+    }
+
+    pub fn materialize_object(&self, id: usize) -> Option<Vec<f32>> {
+        self.get_object(id).map(|object| object.to_vec())
     }
 
     pub fn insert(&mut self, obj: &[f32]) -> Result<usize, String> {

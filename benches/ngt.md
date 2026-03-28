@@ -22,7 +22,7 @@ Loaded ground truth: 10000 queries, top-10
 
 munind
 
-(base) adel@192 munind % time target/release/munind create \  
+(base) adel@192 munind % time target/release/munind create \
   -d 100 \
   -D c \
   benches/indexes/glove-100-angular-munind \

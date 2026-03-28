@@ -1,8 +1,9 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
+use std::time::Instant;
 
-use rand::seq::SliceRandom;
+use rand::Rng;
 use rand::thread_rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -248,17 +249,14 @@ impl Index {
         let reader = BufReader::new(file);
         let mut index: Index = bincode::deserialize_from(reader).map_err(|e| e.to_string())?;
 
-        // Reconstruct object_space correctly
         let mut object_space = ObjectSpace::new(
             index.property.dimension,
             index.property.distance_type.into(),
             index.property.object_type,
         );
-
         for obj in index.objects.iter() {
             object_space.insert_prepared(obj.clone())?;
         }
-
         index.object_space = Some(object_space);
         Ok(index)
     }
@@ -561,6 +559,14 @@ impl Index {
                         .parse()
                         .map_err(|e: std::num::ParseIntError| e.to_string())?
                 }
+                "DatabaseType" => {
+                    property.database_type = match value {
+                        "None" => DatabaseType::None,
+                        "Memory" => DatabaseType::Memory,
+                        "MemoryMappedFile" => DatabaseType::MemoryMappedFile,
+                        other => return Err(format!("Unsupported DatabaseType: {other}")),
+                    }
+                }
                 "DistanceType" => {
                     property.distance_type = match value {
                         "L1" => IndexDistanceType::L1,
@@ -580,6 +586,30 @@ impl Index {
                     property.edge_size_for_search = value
                         .parse()
                         .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "EdgeSizeLimitForCreation" => {
+                    property.edge_size_limit_for_creation = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "EpsilonForCreation" => {
+                    let epsilon_for_creation: f64 = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?;
+                    property.insertion_radius_coefficient = epsilon_for_creation + 1.0;
+                }
+                "EpsilonForInsertionOrder" => {
+                    property.epsilon_for_insertion_order = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "EpsilonType" => {
+                    property.epsilon_type = match value {
+                        "None" => EpsilonType::None,
+                        "ByQuery" => EpsilonType::ByQuery,
+                        "ResultSize" => EpsilonType::ResultSize,
+                        other => return Err(format!("Unsupported EpsilonType: {other}")),
+                    }
                 }
                 "LeafNodeSize" => {
                     property.leaf_node_size = value
@@ -622,6 +652,19 @@ impl Index {
                         other => return Err(format!("Unsupported ObjectType: {other}")),
                     }
                 }
+                "ObjectAlignment" => {
+                    property.object_alignment = match value {
+                        "None" => ObjectAlignment::None,
+                        "True" => ObjectAlignment::True,
+                        "False" => ObjectAlignment::False,
+                        other => return Err(format!("Unsupported ObjectAlignment: {other}")),
+                    }
+                }
+                "PathAdjustmentInterval" => {
+                    property.path_adjustment_interval = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
                 "PrefetchOffset" => {
                     property.prefetch_offset = value
                         .parse()
@@ -631,6 +674,96 @@ impl Index {
                     property.prefetch_size = value
                         .parse()
                         .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "MaxMagnitude" => {
+                    property.max_magnitude = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "QuantizationScale" => {
+                    property.quantization_scale = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "QuantizationOffset" => {
+                    property.quantization_offset = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "QuantizationClippingRate" => {
+                    property.clipping_rate = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "NumberOfNeighborsForInsertionOrder" => {
+                    property.number_of_neighbors_for_insertion_order = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "SeedSize" => {
+                    property.seed_size = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "SeedType" => {
+                    property.seed_type = match value {
+                        "None" => SeedType::None,
+                        "RandomNodes" => SeedType::RandomNodes,
+                        "FixedNodes" => SeedType::FixedNodes,
+                        "FirstNode" => SeedType::FirstNode,
+                        "AllLeafNodes" => SeedType::AllLeafNodes,
+                        other => return Err(format!("Unsupported SeedType: {other}")),
+                    }
+                }
+                "BatchSizeForCreation" => {
+                    property.batch_size_for_creation = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "TruncationThreadPoolSize" => {
+                    property.truncation_thread_pool_size = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "IncrimentalEdgeSizeLimitForTruncation" => {
+                    property.truncation_threshold = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "DynamicEdgeSizeBase" => {
+                    property.dynamic_edge_size_base = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "DynamicEdgeSizeRate" => {
+                    property.dynamic_edge_size_rate = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "BuildTimeLimit" => {
+                    property.build_time_limit = value
+                        .parse()
+                        .map_err(|e: std::num::ParseFloatError| e.to_string())?
+                }
+                "OutgoingEdge" => {
+                    property.outgoing_edge = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "IncomingEdge" => {
+                    property.incoming_edge = value
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?
+                }
+                "IdenticalObjectEdgeType" => {
+                    property.identical_object_edge_type = match value {
+                        "None" => IdenticalObjectEdgeType::None,
+                        "DirectedEdge" => IdenticalObjectEdgeType::DirectedEdge,
+                        "UndirectedEdge" => IdenticalObjectEdgeType::UndirectedEdge,
+                        other => {
+                            return Err(format!("Unsupported IdenticalObjectEdgeType: {other}"));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -650,10 +783,14 @@ impl Index {
     }
 
     pub fn build_index(&mut self) {
+        self.build_index_with_debug(0);
+    }
+
+    pub fn build_index_with_debug(&mut self, debug: u32) {
         let mut graph = NeighborhoodGraph::new();
         graph.edge_size_for_creation = self.property.edge_size_for_creation;
         graph.edge_size_for_search = self.property.edge_size_for_search;
-        graph.insertion_exploration_coefficient = self.property.dynamic_edge_size_rate as f64;
+        graph.insertion_exploration_coefficient = self.property.insertion_radius_coefficient;
         graph.dynamic_edge_size_base = self.property.dynamic_edge_size_base;
         graph.dynamic_edge_size_rate = self.property.dynamic_edge_size_rate;
         let num_objects = self.object_count();
@@ -674,11 +811,11 @@ impl Index {
                 .num_threads(self.property.thread_pool_size)
                 .build();
             match thread_pool {
-                Ok(pool) => pool.install(|| self.build_index_in_batches(num_objects)),
-                Err(_) => self.build_index_sequential(num_objects),
+                Ok(pool) => pool.install(|| self.build_index_in_batches(num_objects, debug)),
+                Err(_) => self.build_index_sequential(num_objects, debug),
             }
         } else {
-            self.build_index_sequential(num_objects);
+            self.build_index_sequential(num_objects, debug);
         }
     }
 
@@ -719,10 +856,9 @@ impl Index {
         let prepared_query = os.prepare_query(query)?;
 
         for i in 1..=self.object_count() {
-            let object = self
-                .object(i)
+            let dist = os
+                .compare_to_id(&prepared_query, i)
                 .ok_or_else(|| format!("Object {i} is missing"))?;
-            let dist = os.compare(&prepared_query, object) as f32;
             results.push(crate::graph::MaxDistanceNode(ObjectDistance {
                 id: i as u32,
                 distance: dist,
@@ -869,8 +1005,7 @@ impl Index {
         };
         for seed in seeds.iter_mut() {
             seed.distance = object_space
-                .get_object(seed.id as usize)
-                .map(|object| object_space.compare(prepared_query, object) as f32)
+                .compare_to_id(prepared_query, seed.id as usize)
                 .unwrap_or(f32::MAX);
         }
     }
@@ -901,13 +1036,21 @@ impl Index {
         if repository_size == 0 || seeds.len() >= requested {
             return;
         }
-        let mut candidates: Vec<u32> = (1..=repository_size as u32)
-            .filter(|id| !seeds.iter().any(|seed| seed.id == *id))
-            .collect();
+        let needed = requested - seeds.len();
+        if needed >= repository_size {
+            for id in 1..=repository_size as u32 {
+                if !seeds.iter().any(|seed| seed.id == id) {
+                    seeds.push(ObjectDistance { id, distance: 0.0 });
+                }
+            }
+            return;
+        }
         let mut rng = thread_rng();
-        candidates.shuffle(&mut rng);
-        for id in candidates.into_iter().take(requested - seeds.len()) {
-            seeds.push(ObjectDistance { id, distance: 0.0 });
+        while seeds.len() < requested {
+            let id = rng.gen_range(1..=repository_size as u32);
+            if !seeds.iter().any(|seed| seed.id == id) {
+                seeds.push(ObjectDistance { id, distance: 0.0 });
+            }
         }
     }
 
@@ -919,7 +1062,7 @@ impl Index {
             if let (Some(tree), Some(object_space)) = (&self.tree, &self.object_space) {
                 if !tree.is_empty() {
                     if let Some(query_object) = self.object(id) {
-                        if let Some(leaf_id) = tree.leaf_for_query(query_object, object_space) {
+                        if let Some(leaf_id) = tree.leaf_for_query(&query_object, object_space) {
                             let mut seeds = tree.get_object_ids_from_leaf(leaf_id);
                             self.thin_tree_seeds(
                                 &mut seeds,
@@ -955,17 +1098,27 @@ impl Index {
                 distance: 0.0,
             }),
             _ => {
-                let mut candidates: Vec<u32> = (1..=max_id as u32).collect();
-                let mut rng = thread_rng();
-                candidates.shuffle(&mut rng);
-                for seed_id in candidates
-                    .into_iter()
-                    .take(self.effective_seed_count(self.property.edge_size_for_creation))
-                {
-                    seeds.push(ObjectDistance {
-                        id: seed_id,
-                        distance: 0.0,
-                    });
+                let requested = self
+                    .effective_seed_count(self.property.edge_size_for_creation)
+                    .min(max_id);
+                if requested == max_id {
+                    for seed_id in 1..=max_id as u32 {
+                        seeds.push(ObjectDistance {
+                            id: seed_id,
+                            distance: 0.0,
+                        });
+                    }
+                } else {
+                    let mut rng = thread_rng();
+                    while seeds.len() < requested {
+                        let seed_id = rng.gen_range(1..=max_id as u32);
+                        if !seeds.iter().any(|seed| seed.id == seed_id) {
+                            seeds.push(ObjectDistance {
+                                id: seed_id,
+                                distance: 0.0,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -980,7 +1133,7 @@ impl Index {
             return Vec::new();
         };
         let mut sc = SearchContainer {
-            object: query_object,
+            object: &query_object,
             radius: f32::MAX,
             size: self.property.edge_size_for_creation,
             exploration_coefficient: self.property.insertion_radius_coefficient,
@@ -1010,10 +1163,9 @@ impl Index {
         };
         let mut results = BinaryHeap::new();
         for other_id in 1..id {
-            let Some(other) = self.object(other_id) else {
+            let Some(dist) = os.compare_to_id(&query, other_id) else {
                 continue;
             };
-            let dist = os.compare(query, other) as f32;
             results.push(crate::graph::MaxDistanceNode(ObjectDistance {
                 id: other_id as u32,
                 distance: dist,
@@ -1030,15 +1182,24 @@ impl Index {
         final_res
     }
 
-    fn build_index_sequential(&mut self, num_objects: usize) {
+    fn build_index_sequential(&mut self, num_objects: usize, debug: u32) {
+        let start = Instant::now();
+        let report_every = progress_interval(num_objects);
         for id in 1..=num_objects {
             self.insert_indexed_object(id, self.search_neighbors_for_insertion(id));
+            if debug >= 1 && (id == 1 || id == num_objects || id % report_every == 0) {
+                eprintln!(
+                    "munind: build_progress inserted={id}/{num_objects} elapsed_ms={:.3}",
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
     }
 
-    fn build_index_in_batches(&mut self, num_objects: usize) {
+    fn build_index_in_batches(&mut self, num_objects: usize, debug: u32) {
         let batch_size = self.property.batch_size_for_creation.max(1);
         let mut start_id = 1usize;
+        let start = Instant::now();
         while start_id <= num_objects {
             let end_id = (start_id + batch_size - 1).min(num_objects);
             let ids: Vec<usize> = (start_id..=end_id).collect();
@@ -1051,6 +1212,12 @@ impl Index {
             self.enrich_batch_results(&mut batch_results);
             for (id, neighbors) in batch_results {
                 self.insert_indexed_object(id, neighbors);
+            }
+            if debug >= 1 {
+                eprintln!(
+                    "munind: build_progress inserted={end_id}/{num_objects} elapsed_ms={:.3}",
+                    start.elapsed().as_secs_f64() * 1000.0
+                );
             }
             start_id = end_id + 1;
         }
@@ -1084,10 +1251,9 @@ impl Index {
             let (previous, current_and_rest) = batch_results.split_at_mut(idx);
             let (id, neighbors) = &mut current_and_rest[0];
             for (prev_id, _) in previous.iter() {
-                let distance = object_space.compare(
-                    self.object(*id).expect("current object missing"),
-                    self.object(*prev_id).expect("previous object missing"),
-                );
+                let distance = object_space
+                    .compare_ids(*id, *prev_id)
+                    .expect("batch object missing");
                 neighbors.push(ObjectDistance {
                     id: *prev_id as u32,
                     distance,
@@ -1130,13 +1296,13 @@ impl Index {
         if !object_space.is_normalized_distance() {
             return false;
         }
-        let Some(object) = object_space.get_object(id) else {
+        let Some(object) = object_space.materialize_object(id) else {
             return true;
         };
-        let Some(neighbor) = object_space.get_object(nearest.id as usize) else {
+        let Some(neighbor) = object_space.materialize_object(nearest.id as usize) else {
             return true;
         };
-        object_space.compare_l1(object, neighbor) != 0.0
+        object_space.compare_l1(&object, &neighbor) != 0.0
     }
 
     fn insert_graph_node(&mut self, id: usize, mut neighbors: Vec<ObjectDistance>) {
@@ -1272,7 +1438,8 @@ impl Index {
             } else {
                 let mut groups: Vec<(u32, usize)> = Vec::new();
                 for candidate in &results[i..j] {
-                    let Some(candidate_object) = object_space.get_object(candidate.id as usize)
+                    let Some(candidate_object) =
+                        object_space.materialize_object(candidate.id as usize)
                     else {
                         continue;
                     };
@@ -1280,9 +1447,9 @@ impl Index {
                     let mut found = false;
                     for group in groups.iter_mut() {
                         let group_object = object_space
-                            .get_object(group.0 as usize)
+                            .materialize_object(group.0 as usize)
                             .expect("group object missing");
-                        if object_space.compare_l1(group_object, candidate_object) == 0.0 {
+                        if object_space.compare_l1(&group_object, &candidate_object) == 0.0 {
                             if candidate_degree > group.1 {
                                 *group = (candidate.id, candidate_degree);
                             }
@@ -1324,7 +1491,7 @@ impl Index {
             Some(object_space) => object_space,
             None => return false,
         };
-        let inserted = match object_space.get_object(id) {
+        let inserted = match object_space.materialize_object(id) {
             Some(object) => object,
             None => return false,
         };
@@ -1336,10 +1503,10 @@ impl Index {
                 break;
             }
             let other_id = neighbor.id as usize;
-            let Some(other) = object_space.get_object(other_id) else {
+            let Some(other) = object_space.materialize_object(other_id) else {
                 continue;
             };
-            if object_space.compare_l1(inserted, other) != 0.0 {
+            if object_space.compare_l1(&inserted, &other) != 0.0 {
                 break;
             }
             let degree = self.graph.edges[other_id - 1].len();
@@ -1386,22 +1553,16 @@ impl Index {
             .unwrap_or(self.objects.len())
     }
 
-    fn object(&self, id: usize) -> Option<&[f32]> {
+    fn object(&self, id: usize) -> Option<Vec<f32>> {
         self.object_space
             .as_ref()
-            .and_then(|object_space| object_space.get_object(id))
-            .or_else(|| self.objects.get(id.saturating_sub(1)).map(Vec::as_slice))
+            .and_then(|object_space| object_space.materialize_object(id))
+            .or_else(|| self.objects.get(id.saturating_sub(1)).cloned())
     }
 
     fn materialize_objects(&self) -> Vec<Vec<f32>> {
         if let Some(object_space) = &self.object_space {
-            object_space
-                .repository
-                .objects
-                .iter()
-                .skip(1)
-                .cloned()
-                .collect()
+            object_space.repository.materialize()
         } else {
             self.objects.clone()
         }
@@ -1491,5 +1652,17 @@ impl Index {
             }
         }
         writer.flush().map_err(|e| e.to_string())
+    }
+}
+
+fn progress_interval(num_objects: usize) -> usize {
+    if num_objects >= 1_000_000 {
+        50_000
+    } else if num_objects >= 100_000 {
+        10_000
+    } else if num_objects >= 10_000 {
+        1_000
+    } else {
+        100
     }
 }

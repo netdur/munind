@@ -17,7 +17,7 @@ QUERY_PATH = ROOT / "benches/data/glove-100-angular.test.tsv"
 HDF5_PATH = ROOT / "benches/data/glove-100-angular.hdf5"
 
 TOP_K = 10
-EPSILONS = [0.1, 0.2, 0.4]
+EPSILONS = [0.2]
 
 
 def load_ground_truth(hdf5_path: Path, k: int) -> np.ndarray:

@@ -4,8 +4,11 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
+use rand::Rng;
+use rand::thread_rng;
+
 use crate::graph::{MaxDistanceNode, MinDistanceNode};
-use crate::index::{IndexProperty, SearchOptions};
+use crate::index::{Index, IndexProperty, SearchOptions};
 use crate::node::ObjectDistance;
 use crate::object_space::ObjectSpace;
 use crate::tree::{DvpTree, TreeNodeRef};
@@ -31,7 +34,7 @@ pub struct MmapIndex {
 impl MmapIndex {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path = path.as_ref();
-        let property = crate::index::Index::load_property_file(path.join("prf"))?;
+        let property = Index::load_property_file(path.join("prf"))?;
         let tree = Self::load_tree_sidecar(path.join("tre.bin"))?;
 
         let objects_file = File::open(path.join("obj.mmap")).map_err(|e| e.to_string())?;
@@ -338,11 +341,18 @@ impl MmapIndex {
                 });
             }
             _ => {
-                for id in 1..=seed_size {
-                    seeds.push(ObjectDistance {
-                        id: id as u32,
-                        distance: 0.0,
-                    });
+                if seed_size == repository_size {
+                    for id in 1..=repository_size as u32 {
+                        seeds.push(ObjectDistance { id, distance: 0.0 });
+                    }
+                } else {
+                    let mut rng = thread_rng();
+                    while seeds.len() < seed_size {
+                        let id = rng.gen_range(1..=repository_size as u32);
+                        if !seeds.iter().any(|seed| seed.id == id) {
+                            seeds.push(ObjectDistance { id, distance: 0.0 });
+                        }
+                    }
                 }
             }
         }

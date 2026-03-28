@@ -205,11 +205,9 @@ impl NeighborhoodGraph {
 
         // compute initial distances for seeds
         for seed in seeds.iter_mut() {
-            if let Some(obj) = object_space.get_object(seed.id as usize) {
-                seed.distance = object_space.compare(sc.object, obj) as Distance;
-            } else {
-                seed.distance = f32::MAX;
-            }
+            seed.distance = object_space
+                .compare_to_id(sc.object, seed.id as usize)
+                .unwrap_or(f32::MAX);
         }
 
         seeds.sort_by(|a, b| {
@@ -269,9 +267,8 @@ impl NeighborhoodGraph {
                 }
                 distance_checked[block_idx] |= bit_mask;
 
-                if let Some(obj) = object_space.get_object(neighbor.id as usize) {
-                    let distance = object_space.compare(sc.object, obj) as Distance;
-
+                if let Some(distance) = object_space.compare_to_id(sc.object, neighbor.id as usize)
+                {
                     if distance <= exploration_radius {
                         let res = ObjectDistance {
                             id: neighbor.id,

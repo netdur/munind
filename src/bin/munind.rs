@@ -203,7 +203,6 @@ fn create(args: CreateArgs, debug: u32) -> Result<(), String> {
     apply_outgoing_incoming(&mut property, args.outgoing_incoming.as_deref())?;
     apply_insertion_order(&mut property, args.insertion_order.as_deref())?;
     apply_object_type(&mut property, &args.object_type)?;
-
     if debug >= 1 {
         eprintln!("munind: command=create");
         eprintln!("munind: dimension={}", property.dimension);
@@ -214,7 +213,7 @@ fn create(args: CreateArgs, debug: u32) -> Result<(), String> {
     let mut index = Index::create(&args.index, property)?;
     if let Some(data) = args.data.as_ref() {
         load_vectors_into_index(data, index.property.dimension, &mut index)?;
-        index.build_index();
+        index.build_index_with_debug(debug);
     }
     save_auto(&mut index, &args.index)?;
     if !args.quiet {
@@ -232,7 +231,7 @@ fn append(args: AppendArgs, debug: u32) -> Result<(), String> {
     if let Some(data) = args.data.as_ref() {
         load_vectors_into_index(data, index.property.dimension, &mut index)?;
     }
-    index.build_index();
+    index.build_index_with_debug(debug);
     save_auto(&mut index, &args.index)?;
     if debug >= 1 {
         eprintln!("munind: command=append");
@@ -247,8 +246,21 @@ fn append(args: AppendArgs, debug: u32) -> Result<(), String> {
 }
 
 fn search(args: SearchArgs, debug: u32) -> Result<(), String> {
+    if debug >= 1 {
+        eprintln!("munind: opening index {}", args.index.display());
+    }
+    let open_started = Instant::now();
     let index = open_auto(&args.index)?;
+    if debug >= 1 {
+        eprintln!(
+            "munind: index_open_ms={:.3}",
+            open_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     let queries = load_vectors(&args.query, index.property.dimension)?;
+    if debug >= 1 {
+        eprintln!("munind: loaded_queries={}", queries.len());
+    }
     let mut total = 0.0f64;
 
     for (query_no, query) in queries.iter().enumerate() {
@@ -261,8 +273,16 @@ fn search(args: SearchArgs, debug: u32) -> Result<(), String> {
                 edge_size: Some(args.edge_size),
             },
         )?;
-        total += started.elapsed().as_secs_f64() * 1000.0;
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        total += elapsed_ms;
         print_query_results(query_no + 1, &results, &args.output_mode);
+        if debug >= 2 && ((query_no + 1) % 1000 == 0 || query_no == 0) {
+            eprintln!(
+                "munind: query_no={} elapsed_ms={:.3}",
+                query_no + 1,
+                elapsed_ms
+            );
+        }
     }
 
     let average = if queries.is_empty() {
@@ -353,7 +373,7 @@ fn export_objects(args: IndexOnlyArgs) -> Result<(), String> {
 
 fn rebuild(args: IndexOnlyArgs) -> Result<(), String> {
     let mut index = open_auto(&args.index)?;
-    index.build_index();
+    index.build_index_with_debug(0);
     save_auto(&mut index, &args.index)
 }
 

@@ -137,8 +137,8 @@ impl DvpTree {
                 TreeNodeRef::Leaf(leaf_id) => return Some(leaf_id),
                 TreeNodeRef::Internal(internal_id) => {
                     let node = self.internal(internal_id);
-                    let pivot = object_space.get_object(node.pivot_id as usize)?;
-                    let distance = object_space.compare(query, pivot) as f32;
+                    let pivot = object_space.materialize_object(node.pivot_id as usize)?;
+                    let distance = object_space.compare(query, &pivot) as f32;
                     let (region, _) = self
                         .search_regions(distance, 0.0, &node.borders)
                         .into_iter()
@@ -178,10 +178,11 @@ impl DvpTree {
                 }
                 TreeNodeRef::Internal(internal_id) => {
                     let node = self.internal(internal_id);
-                    let Some(pivot) = object_space.get_object(node.pivot_id as usize) else {
+                    let Some(pivot) = object_space.materialize_object(node.pivot_id as usize)
+                    else {
                         continue;
                     };
-                    let distance = object_space.compare(query, pivot) as f32;
+                    let distance = object_space.compare(query, &pivot) as f32;
                     let regions = self.search_regions(distance, 0.0, &node.borders);
                     let Some((first_region, _first_distance)) = regions.first().copied() else {
                         continue;
@@ -228,10 +229,10 @@ impl DvpTree {
     }
 
     fn search_leaf_id_for_object(&self, object_id: u32, object_space: &ObjectSpace) -> usize {
-        let Some(object) = object_space.get_object(object_id as usize) else {
+        let Some(object) = object_space.materialize_object(object_id as usize) else {
             return self.root_leaf_id();
         };
-        self.leaf_for_query(object, object_space)
+        self.leaf_for_query(&object, object_space)
             .unwrap_or(self.root_leaf_id())
     }
 
@@ -244,12 +245,12 @@ impl DvpTree {
             0.0
         } else {
             let pivot = object_space
-                .get_object(pivot_id as usize)
+                .materialize_object(pivot_id as usize)
                 .expect("pivot object missing");
             let object = object_space
-                .get_object(object_id as usize)
+                .materialize_object(object_id as usize)
                 .expect("inserted object missing");
-            object_space.compare(object, pivot) as f32
+            object_space.compare(&object, &pivot) as f32
         };
 
         let leaf = self.leaf_mut(leaf_id);
@@ -410,13 +411,9 @@ impl DvpTree {
         let mut distances = vec![0.0f32; fsize * fsize];
         for i in 0..fsize {
             for j in (i + 1)..fsize {
-                let lhs = object_space
-                    .get_object(entries[i].id as usize)
+                let distance = object_space
+                    .compare_ids(entries[i].id as usize, entries[j].id as usize)
                     .expect("object missing");
-                let rhs = object_space
-                    .get_object(entries[j].id as usize)
-                    .expect("object missing");
-                let distance = object_space.compare(lhs, rhs) as f32;
                 distances[i * fsize + j] = distance;
                 distances[j * fsize + i] = distance;
             }
@@ -451,17 +448,13 @@ impl DvpTree {
         object_space: &ObjectSpace,
     ) {
         let pivot_id = entries[pivot_idx].id;
-        let pivot = object_space
-            .get_object(pivot_id as usize)
-            .expect("pivot object missing");
         for entry in entries.iter_mut() {
             if entry.id == pivot_id {
                 entry.distance = 0.0;
             } else {
-                let object = object_space
-                    .get_object(entry.id as usize)
+                entry.distance = object_space
+                    .compare_ids(pivot_id as usize, entry.id as usize)
                     .expect("object missing");
-                entry.distance = object_space.compare(pivot, object) as f32;
             }
         }
         entries.sort_by(|a, b| {
@@ -506,13 +499,9 @@ impl DvpTree {
                     continue;
                 }
             };
-            let pivot_obj = object_space
-                .get_object(entries[pivot_idx].id as usize)
-                .expect("cluster pivot missing");
-            let object = object_space
-                .get_object(entries[idx].id as usize)
+            entries[idx].leaf_distance = object_space
+                .compare_ids(entries[pivot_idx].id as usize, entries[idx].id as usize)
                 .expect("object missing");
-            entries[idx].leaf_distance = object_space.compare(pivot_obj, object) as f32;
         }
     }
 
