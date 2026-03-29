@@ -158,7 +158,7 @@ fn test_tree_splits_and_returns_leaf_seeds() {
     let leaf_id = tree.leaf_for_query(&[10.0, 10.2], object_space).unwrap();
     let seeds = tree.get_object_ids_from_leaf(leaf_id);
 
-    assert!(tree.leaves.iter().flatten().count() >= 2);
+    assert!(tree.leaves().iter().flatten().count() >= 2);
     let has_3 = seeds.iter().any(|seed| { let sid = seed.id; sid == 3 });
     let has_4 = seeds.iter().any(|seed| { let sid = seed.id; sid == 4 });
     assert!(has_3);

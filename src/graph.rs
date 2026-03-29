@@ -153,10 +153,17 @@ impl Default for GraphProperty {
 /// whether truncation is needed.
 pub struct NeighborhoodGraph {
     /// Adjacency lists (1-based).  `nodes[0]` = None.
+    /// Used during build (dynamic adds/removes).
     pub nodes: Vec<Option<Vec<ObjectDistance>>>,
     /// Per-node previous size (for truncation).  Index 0 unused.
     pub prevsize: Vec<u16>,
     pub property: GraphProperty,
+
+    /// Flat CSR (Compressed Sparse Row) layout — populated after build via
+    /// `compact()`.  All edges contiguous in one allocation for cache-friendly
+    /// search traversal.
+    pub(crate) flat_offsets: Option<Vec<u32>>,
+    pub(crate) flat_edges: Option<Vec<ObjectDistance>>,
 }
 
 impl NeighborhoodGraph {
@@ -165,6 +172,8 @@ impl NeighborhoodGraph {
             nodes: vec![None], // slot 0
             prevsize: vec![0],
             property: GraphProperty::default(),
+            flat_offsets: None,
+            flat_edges: None,
         }
     }
 
@@ -173,6 +182,8 @@ impl NeighborhoodGraph {
             nodes: vec![None],
             prevsize: vec![0],
             property: prop,
+            flat_offsets: None,
+            flat_edges: None,
         }
     }
 
@@ -181,14 +192,57 @@ impl NeighborhoodGraph {
         self.nodes.len()
     }
 
+    /// Compact all edge lists into a flat CSR layout for cache-friendly search.
+    /// Call this after build is complete, before search.
+    pub fn compact(&mut self) {
+        let n = self.nodes.len();
+        let mut offsets = Vec::with_capacity(n + 1);
+        let total_edges: usize = self.nodes.iter()
+            .map(|opt| opt.as_ref().map_or(0, |v| v.len()))
+            .sum();
+        let mut edges = Vec::with_capacity(total_edges);
+
+        for slot in &self.nodes {
+            offsets.push(edges.len() as u32);
+            if let Some(node_edges) = slot {
+                edges.extend_from_slice(node_edges);
+            }
+        }
+        offsets.push(edges.len() as u32);
+
+        self.flat_offsets = Some(offsets);
+        self.flat_edges = Some(edges);
+    }
+
+    /// Invalidate the flat CSR layout (call before mutating the graph).
+    fn invalidate_compact(&mut self) {
+        self.flat_offsets = None;
+        self.flat_edges = None;
+    }
+
     pub fn is_empty_node(&self, id: ObjectID) -> bool {
         let idx = id as usize;
         idx >= self.nodes.len() || self.nodes[idx].is_none()
     }
 
     /// Get the adjacency list for node `id`.
-    pub fn get_node(&self, id: ObjectID) -> Option<&Vec<ObjectDistance>> {
-        self.nodes.get(id as usize).and_then(|o| o.as_ref())
+    /// Uses flat CSR layout if available (after `compact()`), otherwise
+    /// falls back to the per-node Vec.
+    #[inline]
+    pub fn get_node(&self, id: ObjectID) -> Option<&[ObjectDistance]> {
+        let idx = id as usize;
+        if let (Some(offsets), Some(edges)) = (&self.flat_offsets, &self.flat_edges) {
+            if idx + 1 < offsets.len() {
+                let start = offsets[idx] as usize;
+                let end = offsets[idx + 1] as usize;
+                if start == end && self.nodes.get(idx).map_or(true, |n| n.is_none()) {
+                    return None;
+                }
+                return Some(&edges[start..end]);
+            }
+            return None;
+        }
+        self.nodes.get(idx).and_then(|o| o.as_ref()).map(|v| v.as_slice())
     }
 
     /// Get mutable adjacency list for node `id`.
@@ -273,6 +327,7 @@ impl NeighborhoodGraph {
     /// Store an adjacency list for `id`.
     /// Maps to `GraphRepository::insert`.
     pub fn insert_node(&mut self, id: ObjectID, edges: Vec<ObjectDistance>) {
+        self.invalidate_compact();
         let idx = id as usize;
         if idx >= self.nodes.len() {
             self.nodes.resize_with(idx + 1, || None);
@@ -796,8 +851,122 @@ impl NeighborhoodGraph {
         result_vec
     }
 
-    /// Compute distances from `query` to each seed's object.
-    /// Maps to `NeighborhoodGraph::setupDistances`.
+    /// Search using any ObjectAccessor (supports MmapObjectSpace).
+    pub fn search_with_mmap(
+        &self,
+        query: &[f32],
+        seeds: &mut Vec<ObjectDistance>,
+        k: usize,
+        epsilon: f32,
+        edge_size: i32,
+        radius: f32,
+        os: &dyn crate::mmap_index::ObjectAccessor,
+    ) -> Vec<ObjectDistance> {
+        let exploration_coefficient = if epsilon == 0.0 {
+            DEFAULT_EXPLORATION_COEFFICIENT
+        } else {
+            epsilon + 1.0
+        };
+        let edge_size = self.get_edge_size(edge_size);
+
+        for seed in seeds.iter_mut() {
+            let sid: u32 = seed.id;
+            match os.get_object(sid) {
+                Ok(obj) => seed.distance = os.distance(query, obj),
+                Err(_) => seed.distance = f32::MAX,
+            }
+        }
+        seeds.sort_unstable_by(|a, b| a.cmp(b));
+
+        let mut results: BinaryHeap<ObjectDistance> = BinaryHeap::new();
+        let mut unchecked: BinaryHeap<Reverse<ObjectDistance>> = BinaryHeap::new();
+        let mut distance_checked = BooleanVector::new(self.nodes.len());
+        let mut current_radius = radius;
+
+        let padded_dim = ((os.dim().saturating_sub(1)) / 16 + 1) * 16;
+        let prefetch_offset: usize =
+            (300.0 / (padded_dim as f32 + 30.0) + 1.0).floor() as usize;
+
+        for s in seeds.iter() {
+            let s_dist: f32 = s.distance;
+            let s_id: u32 = s.id;
+            if results.len() < k && s_dist <= current_radius {
+                results.push(*s);
+            }
+            if s_dist < f32::MAX {
+                distance_checked.insert(s_id);
+                unchecked.push(Reverse(*s));
+            }
+        }
+        if results.len() >= k {
+            if let Some(top) = results.peek() {
+                current_radius = top.distance;
+            }
+        }
+        let mut exploration_radius = exploration_coefficient * current_radius;
+
+        while let Some(Reverse(target)) = unchecked.pop() {
+            let target_dist: f32 = target.distance;
+            if target_dist > exploration_radius { break; }
+            let target_id: u32 = target.id;
+            let neighbors = match self.get_node(target_id) {
+                Some(n) => n,
+                None => continue,
+            };
+            if neighbors.is_empty() { continue; }
+            let neighbor_size = neighbors.len().min(edge_size);
+
+            let poft = prefetch_offset.min(neighbor_size);
+            for i in 0..poft {
+                let nid: u32 = neighbors[i].id;
+                if !distance_checked.contains(nid) {
+                    if let Ok(obj) = os.get_object(nid) {
+                        prefetch_read(obj.as_ptr());
+                    }
+                }
+            }
+            for ni in 0..neighbor_size {
+                if ni + prefetch_offset < neighbor_size {
+                    let ahead_id: u32 = neighbors[ni + prefetch_offset].id;
+                    if !distance_checked.contains(ahead_id) {
+                        if let Ok(obj) = os.get_object(ahead_id) {
+                            prefetch_read(obj.as_ptr());
+                        }
+                    }
+                }
+                let neighbor_id: u32 = neighbors[ni].id;
+                if distance_checked.contains(neighbor_id) { continue; }
+                distance_checked.insert(neighbor_id);
+                if !os.is_present(neighbor_id) { continue; }
+                let stored = match os.get_object(neighbor_id) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let distance = os.distance(query, stored);
+                if distance <= exploration_radius {
+                    let result = ObjectDistance::new(neighbor_id, distance);
+                    unchecked.push(Reverse(result));
+                    if distance <= current_radius {
+                        results.push(result);
+                        if results.len() >= k {
+                            if let Some(top) = results.peek() {
+                                let top_dist: f32 = top.distance;
+                                if top_dist >= distance {
+                                    if results.len() > k { results.pop(); }
+                                    current_radius = results.peek().unwrap().distance;
+                                    exploration_radius = exploration_coefficient * current_radius;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut result_vec: Vec<ObjectDistance> = results.into_vec();
+        result_vec.sort_unstable_by(|a, b| a.cmp(b));
+        result_vec
+    }
+
     fn setup_distances(
         &self,
         query: &[f32],

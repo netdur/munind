@@ -1,6 +1,8 @@
 /// Public-facing NGT Index — wraps ObjectSpace + DVPTree + NeighborhoodGraph
 /// with the API expected by tests/ngt_engine.rs.
 
+use std::io::Write;
+
 use rayon::prelude::*;
 
 use crate::common::{NgtError, ObjectDistance, ObjectID, PropertySet, SearchOptions};
@@ -207,7 +209,10 @@ impl Graph {
         }
     }
 
-    /// Sync `edges` (0-indexed) from `inner.nodes` (1-indexed).
+    /// Sync `edges` (0-indexed) from the flat CSR layout if available,
+    /// otherwise from `inner.nodes` (1-indexed).
+    /// When CSR is available, copies from contiguous memory (fast memcpy)
+    /// instead of cloning scattered heap Vecs.
     fn sync_from_inner(&mut self) {
         let node_count = if self.inner.nodes.len() > 1 {
             self.inner.nodes.len() - 1
@@ -216,10 +221,25 @@ impl Graph {
         };
         self.edges.clear();
         self.edges.reserve(node_count);
-        for i in 1..self.inner.nodes.len() {
-            match &self.inner.nodes[i] {
-                Some(edges) => self.edges.push(edges.clone()),
-                None => self.edges.push(Vec::new()),
+
+        if let (Some(offsets), Some(flat)) = (&self.inner.flat_offsets, &self.inner.flat_edges) {
+            // Fast path: slice the contiguous CSR buffer.
+            for i in 1..self.inner.nodes.len() {
+                if i + 1 < offsets.len() {
+                    let start = offsets[i] as usize;
+                    let end = offsets[i + 1] as usize;
+                    self.edges.push(flat[start..end].to_vec());
+                } else {
+                    self.edges.push(Vec::new());
+                }
+            }
+        } else {
+            // Fallback: clone from scattered Vecs.
+            for i in 1..self.inner.nodes.len() {
+                match &self.inner.nodes[i] {
+                    Some(edges) => self.edges.push(edges.clone()),
+                    None => self.edges.push(Vec::new()),
+                }
             }
         }
     }
@@ -230,21 +250,23 @@ impl Graph {
 // ---------------------------------------------------------------------------
 
 pub struct Tree {
-    pub leaves: Vec<Option<crate::node::LeafNode>>,
-    inner: DVPTree,
+    pub(crate) inner: DVPTree,
 }
 
 impl Tree {
     fn new(prop: &IndexProperty) -> Self {
-        let inner = DVPTree::new(prop.leaf_node_size, prop.internal_children_size);
         Tree {
-            leaves: inner.leaf_nodes.clone(),
-            inner,
+            inner: DVPTree::new(prop.leaf_node_size, prop.internal_children_size),
         }
     }
 
+    /// Direct access to leaf nodes (no cloning — references inner storage).
+    pub fn leaves(&self) -> &[Option<crate::node::LeafNode>] {
+        &self.inner.leaf_nodes
+    }
+
     fn sync_from_inner(&mut self) {
-        self.leaves = self.inner.leaf_nodes.clone();
+        // No-op: leaves() reads inner.leaf_nodes directly.
     }
 
     pub fn leaf_for_query(
@@ -329,6 +351,7 @@ impl Index {
 
         let mut graph = Graph::new(&property);
         graph.inner.deserialize_from_file(&format!("{}/grp", path))?;
+        graph.inner.compact();
         graph.sync_from_inner();
 
         let tree = if property.index_type == IndexType::GraphAndTree {
@@ -823,8 +846,65 @@ impl Index {
     }
 
     pub fn save_as_mmap(&self, dir: &str) -> Result<(), NgtError> {
-        // For Phase 1, mmap format is the same as directory format.
-        self.save_as_directory(dir)
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("save_as_mmap: {}: {}", dir, e))?;
+
+        // Property file (same as directory).
+        let mut ps = PropertySet::new();
+        self.property.export_to(&mut ps);
+        ps.save(&format!("{}/prf", dir))?;
+
+        // Graph (same format).
+        self.graph.inner.serialize_to_file(&format!("{}/grp", dir))?;
+
+        // Tree (same format).
+        if let Some(tree) = &self.tree {
+            tree.inner.serialize_to_file(&format!("{}/tre", dir), self.property.dimension)?;
+        }
+
+        // Objects: mmap-friendly flat format.
+        // Header: [8] slot_count + [8] dim
+        // Data:   slot_count * dim * 4 bytes (f32 LE, slot 0 = zeroed)
+        // Bitmap: slot_count bytes (0 = absent, 1 = present)
+        if let Some(os) = &self.object_space {
+            let path = format!("{}/obj.mmap", dir);
+            let f = std::fs::File::create(&path)
+                .map_err(|e| format!("save_as_mmap obj: {}", e))?;
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+
+            let slot_count = os.size() as u64;
+            let dim = os.dim as u64;
+            w.write_all(&slot_count.to_le_bytes())
+                .map_err(|e| format!("save_as_mmap: {}", e))?;
+            w.write_all(&dim.to_le_bytes())
+                .map_err(|e| format!("save_as_mmap: {}", e))?;
+
+            // Write flat f32 data for ALL slots (including slot 0 and removed).
+            for idx in 0..os.size() {
+                if os.is_present(idx as ObjectID) {
+                    let obj = os.get_object(idx as ObjectID).unwrap();
+                    for &v in obj {
+                        w.write_all(&v.to_le_bytes())
+                            .map_err(|e| format!("save_as_mmap: {}", e))?;
+                    }
+                } else {
+                    // Zeroed slot.
+                    for _ in 0..os.dim {
+                        w.write_all(&0.0f32.to_le_bytes())
+                            .map_err(|e| format!("save_as_mmap: {}", e))?;
+                    }
+                }
+            }
+
+            // Write presence bitmap.
+            for idx in 0..os.size() {
+                let byte: u8 = if idx > 0 && os.is_present(idx as ObjectID) { 1 } else { 0 };
+                w.write_all(&[byte])
+                    .map_err(|e| format!("save_as_mmap: {}", e))?;
+            }
+        }
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -832,6 +912,7 @@ impl Index {
     // -----------------------------------------------------------------------
 
     fn sync_views(&mut self) {
+        self.graph.inner.compact();
         self.graph.sync_from_inner();
         if let Some(tree) = &mut self.tree {
             tree.sync_from_inner();

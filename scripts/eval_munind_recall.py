@@ -36,7 +36,7 @@ def run_munind_search(
 ) -> str:
     cmd = [
         str(munind_bin),
-        "search",
+        "search-mmap",
         "-n",
         str(k),
         "-e",

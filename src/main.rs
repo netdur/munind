@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
-use munind::{Index, IndexDistanceType, IndexProperty, SearchOptions};
+use munind::{Index, IndexDistanceType, IndexProperty, MmapIndex, SearchOptions};
 
 #[derive(Parser)]
 #[command(name = "munind", version, about = "munind — NGT-compatible nearest neighbor index")]
@@ -51,6 +51,31 @@ enum Command {
 
     /// Search an index with queries from a TSV file or stdin.
     Search {
+        /// Number of results per query.
+        #[arg(short = 'n', long, default_value = "10")]
+        result_size: usize,
+
+        /// Epsilon (exploration coefficient offset).
+        #[arg(short = 'e', long, default_value = "0.1")]
+        epsilon: f32,
+
+        /// Edge size for search (0 = all).
+        #[arg(short = 'E', long, default_value = "0")]
+        edge_size: i32,
+
+        /// Output mode: (i)d, (d)istance, or (e)xtended.
+        #[arg(short = 'o', long, default_value = "d")]
+        output_mode: String,
+
+        /// Index path.
+        index: String,
+
+        /// Query TSV file (reads from stdin if omitted).
+        query: Option<String>,
+    },
+
+    /// Search using memory-mapped index (zero-copy object loading).
+    SearchMmap {
         /// Number of results per query.
         #[arg(short = 'n', long, default_value = "10")]
         result_size: usize,
@@ -192,6 +217,8 @@ fn cmd_create(
     let start = Instant::now();
     eprint!("Saving index...");
     index.save_as_directory(&index_path).map_err(|e| e.to_string())?;
+    // Also save mmap format for MmapIndex.
+    index.save_as_mmap(&index_path).map_err(|e| e.to_string())?;
     eprintln!(" done in {:.2}s", start.elapsed().as_secs_f64());
     eprintln!("munind: created index at {} with {} objects", index_path, index.object_count());
     Ok(())
@@ -278,13 +305,90 @@ fn cmd_search(
     Ok(())
 }
 
+fn cmd_search_mmap(
+    result_size: usize,
+    epsilon: f32,
+    edge_size: i32,
+    output_mode: String,
+    index_path: String,
+    query_path: Option<String>,
+) -> Result<(), String> {
+    let start = Instant::now();
+    let index = MmapIndex::open(&index_path).map_err(|e| e.to_string())?;
+    eprintln!("MmapIndex opened in {:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
+
+    let dim = index.object_count(); // We need dim from property; use a workaround.
+    // Read dim from property file.
+    let mut ps = munind::common::PropertySet::new();
+    ps.load(&format!("{}/prf", index_path)).map_err(|e| e.to_string())?;
+    let dim = ps.get_i64("Dimension", 0) as usize;
+
+    let options = SearchOptions {
+        k: result_size,
+        epsilon,
+        edge_size: if edge_size == 0 { None } else { Some(edge_size as usize) },
+    };
+
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+
+    let reader: Box<dyn BufRead> = match query_path {
+        Some(path) => {
+            let file = std::fs::File::open(&path)
+                .map_err(|e| format!("Cannot open {}: {}", path, e))?;
+            Box::new(BufReader::new(file))
+        }
+        None => Box::new(BufReader::new(std::io::stdin())),
+    };
+
+    let mut query_count = 0u64;
+    let mut total_time = std::time::Duration::ZERO;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| format!("Read error: {}", e))?;
+        let line = line.trim().to_string();
+        if line.is_empty() { continue; }
+
+        let vals: Vec<f32> = line
+            .split(|c: char| c == '\t' || c == ' ' || c == ',')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<f32>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Parse error: {}", e))?;
+
+        if vals.len() < dim { continue; }
+        let q = &vals[..dim];
+
+        let start = Instant::now();
+        let results = index.search(q, &options).map_err(|e| e.to_string())?;
+        total_time += start.elapsed();
+        query_count += 1;
+
+        writeln!(out, "Query No.{}", query_count).ok();
+        for (rank, r) in results.iter().enumerate() {
+            let rid: u32 = r.id;
+            let rdist: f32 = r.distance;
+            match output_mode.as_str() {
+                "i" => writeln!(out, "{}\t{}", rank + 1, rid).ok(),
+                _ => writeln!(out, "{}\t{}\t{}", rank + 1, rid, rdist).ok(),
+            };
+        }
+    }
+
+    if query_count > 0 {
+        let avg_ms = total_time.as_secs_f64() / query_count as f64 * 1000.0;
+        eprintln!("Average query time: {:.6} ms ({} queries)", avg_ms, query_count);
+    }
+    Ok(())
+}
+
 fn cmd_info(index_path: String) -> Result<(), String> {
     let index = Index::open_directory(&index_path).map_err(|e| e.to_string())?;
     let os = index.object_space.as_ref().ok_or("no object space")?;
     println!("Number of objects\t{}", index.object_count());
     println!("Dimension\t\t{}", os.dim);
     println!("Graph edges\t\t{}", index.graph.edges.iter().map(Vec::len).sum::<usize>());
-    println!("Leaf nodes\t\t{}", index.tree.as_ref().map_or(0, |t| t.leaves.iter().flatten().count()));
+    println!("Leaf nodes\t\t{}", index.tree.as_ref().map_or(0, |t| t.leaves().iter().flatten().count()));
     Ok(())
 }
 
@@ -348,6 +452,14 @@ fn main() {
             index,
             query,
         } => cmd_search(result_size, epsilon, edge_size, output_mode, index, query),
+        Command::SearchMmap {
+            result_size,
+            epsilon,
+            edge_size,
+            output_mode,
+            index,
+            query,
+        } => cmd_search_mmap(result_size, epsilon, edge_size, output_mode, index, query),
         Command::Info { index } => cmd_info(index),
         Command::Append { index, data } => cmd_append(index, data),
         Command::Remove { index, ids } => cmd_remove(index, ids),
