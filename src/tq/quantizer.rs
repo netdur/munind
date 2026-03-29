@@ -37,7 +37,8 @@ impl TqQuantizer {
     /// Create a new quantizer.  If `use_prod` is true, also generates the QJL matrix.
     pub fn new(dim: usize, bits: u32, use_prod: bool) -> Self {
         let rotation = RotationMatrix::random(dim);
-        let codebook = ScalarCodebook::build(dim, bits);
+        // Build codebook for padded_dim (WHT operates at power-of-2 size).
+        let codebook = ScalarCodebook::build(rotation.padded_dim(), bits);
         let qjl_matrix = if use_prod {
             let mut rng = rand::thread_rng();
             let mut m = vec![0.0f32; dim * dim];
@@ -121,24 +122,31 @@ impl TqQuantizer {
     // TurboQuant_mse: encode / decode
     // -----------------------------------------------------------------------
 
+    /// The padded dimension used by the WHT rotation.
+    pub fn padded_dim(&self) -> usize {
+        self.rotation.padded_dim()
+    }
+
     /// Encode a vector using TurboQuant_mse.
+    /// Returns codes of length `padded_dim` (WHT operates on padded size).
     pub fn encode_mse(&self, x: &[f32]) -> EncodedMse {
         debug_assert_eq!(x.len(), self.dim);
-        let d = self.dim;
+        let pd = self.rotation.padded_dim();
 
         // Compute norm and normalize.
         let norm: f32 = x.iter().map(|&v| v * v).sum::<f32>().sqrt();
         let inv_norm = if norm > 0.0 { 1.0 / norm } else { 1.0 };
 
-        // Rotate: y = Π · (x / ‖x‖).
-        let mut unit = vec![0.0f32; d];
-        for i in 0..d {
+        let mut unit = vec![0.0f32; self.dim];
+        for i in 0..self.dim {
             unit[i] = x[i] * inv_norm;
         }
-        let mut y = vec![0.0f32; d];
+
+        // Rotate: y = WHT(D · x), output has padded_dim coordinates.
+        let mut y = vec![0.0f32; pd];
         self.rotation.mul(&unit, &mut y);
 
-        // Scalar quantize each coordinate.
+        // Scalar quantize each coordinate (all padded_dim of them).
         let codes: Vec<u32> = y.iter().map(|&v| self.codebook.quantize(v)).collect();
 
         EncodedMse { codes, norm }
@@ -146,13 +154,13 @@ impl TqQuantizer {
 
     /// Decode a TurboQuant_mse encoded vector.
     pub fn decode_mse(&self, enc: &EncodedMse) -> Vec<f32> {
-        let d = self.dim;
+        let pd = enc.codes.len();
 
-        // Dequantize each coordinate.
-        let mut y: Vec<f32> = enc.codes.iter().map(|&c| self.codebook.dequantize(c)).collect();
+        // Dequantize each coordinate (padded_dim).
+        let y: Vec<f32> = enc.codes.iter().map(|&c| self.codebook.dequantize(c)).collect();
 
-        // Inverse rotate: x̃ = norm · Π^T · ỹ.
-        let mut out = vec![0.0f32; d];
+        // Inverse rotate: x̃ = norm · Π^T · ỹ → output has original dim.
+        let mut out = vec![0.0f32; self.dim];
         self.rotation.mul_transpose(&y, &mut out);
 
         for v in out.iter_mut() {
@@ -164,14 +172,11 @@ impl TqQuantizer {
     /// Decode in-place into a provided buffer (avoids allocation in hot path).
     #[inline]
     pub fn decode_mse_into(&self, codes: &[u32], norm: f32, out: &mut [f32]) {
-        let d = self.dim;
-        debug_assert_eq!(codes.len(), d);
-        debug_assert_eq!(out.len(), d);
+        let pd = codes.len();
+        debug_assert_eq!(out.len(), self.dim);
 
-        // Dequantize into a temp buffer (reuses `out` as scratch for rotated).
-        // We need a separate buffer since mul_transpose reads and writes different arrays.
-        let mut y = vec![0.0f32; d];
-        for i in 0..d {
+        let mut y = vec![0.0f32; pd];
+        for i in 0..pd {
             y[i] = self.codebook.dequantize(codes[i]);
         }
 

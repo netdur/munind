@@ -101,9 +101,10 @@ impl TqObjectSpace {
             .map_err(|e| format!("TqObjectSpace::save: {}: {}", path, e))?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
 
+        let code_dim = self.quantizer.padded_dim() as u64;
         w.write_all(&(self.slot_count as u64).to_le_bytes())
             .map_err(|e| format!("{}", e))?;
-        w.write_all(&(self.dim as u64).to_le_bytes())
+        w.write_all(&code_dim.to_le_bytes())
             .map_err(|e| format!("{}", e))?;
         w.write_all(&self.quantizer.bits.to_le_bytes())
             .map_err(|e| format!("{}", e))?;
@@ -146,7 +147,7 @@ impl TqObjectSpace {
         r.read_exact(&mut buf8).map_err(|e| format!("{}", e))?;
         let slot_count = u64::from_le_bytes(buf8) as usize;
         r.read_exact(&mut buf8).map_err(|e| format!("{}", e))?;
-        let dim = u64::from_le_bytes(buf8) as usize;
+        let code_dim = u64::from_le_bytes(buf8) as usize; // padded_dim
         r.read_exact(&mut buf4).map_err(|e| format!("{}", e))?;
         let _bits = u32::from_le_bytes(buf4);
 
@@ -163,8 +164,8 @@ impl TqObjectSpace {
             let mut flag = [0u8; 1];
             r.read_exact(&mut flag).map_err(|e| format!("{}", e))?;
             if flag[0] == 1 {
-                let mut c = vec![0u32; dim];
-                for j in 0..dim {
+                let mut c = vec![0u32; code_dim];
+                for j in 0..code_dim {
                     let mut b = [0u8; 1];
                     r.read_exact(&mut b).map_err(|e| format!("{}", e))?;
                     c[j] = b[0] as u32;
@@ -188,7 +189,7 @@ impl TqObjectSpace {
         }
 
         Ok(TqObjectSpace {
-            dim,
+            dim: quantizer.dim,
             distance_type,
             normalization: primitive_comparator::requires_normalization(distance_type),
             slot_count,
@@ -441,15 +442,15 @@ impl TqIndex {
             query
         };
 
-        let dim = self.tq_objects.dim;
+        let pd = self.tq_objects.quantizer.padded_dim();
         let dt = self.tq_objects.distance_type;
 
         // Rotate query once.
-        let mut q_rot = vec![0.0f32; dim];
+        let mut q_rot = vec![0.0f32; pd];
         self.tq_objects.quantizer.rotation.mul(q, &mut q_rot);
 
         let mut results = crate::common::ResultSet::with_capacity(k + 1);
-        let mut buf = vec![0.0f32; dim];
+        let mut buf = vec![0.0f32; pd];
 
         for id in 1..self.tq_objects.slot_count {
             let oid = id as ObjectID;
@@ -531,8 +532,8 @@ impl TqIndex {
         }
     }
 
-    /// Dequantize in rotated domain (no matrix multiply — just scalar lookups).
-    /// Returns the rotated, scaled vector: ỹ * norm.
+    /// Dequantize in rotated domain (just scalar lookups — O(padded_dim)).
+    /// Returns the rotated, scaled vector: ỹ * norm, length = padded_dim.
     #[inline]
     fn dequantize_rotated(&self, id: ObjectID, out: &mut [f32]) -> Result<(), NgtError> {
         let idx = id as usize;
@@ -543,7 +544,7 @@ impl TqIndex {
         let codes = tq.codes[idx].as_ref().unwrap();
         let norm = tq.norms[idx];
         let cb = &tq.quantizer.codebook;
-        for i in 0..tq.dim {
+        for i in 0..codes.len() {
             out[i] = cb.dequantize(codes[i]) * norm;
         }
         Ok(())
@@ -576,15 +577,15 @@ impl TqIndex {
             if es <= 0 { usize::MAX } else { es as usize }
         };
 
-        let dim = self.tq_objects.dim;
+        let pd = self.tq_objects.quantizer.padded_dim();
         let dt = self.tq_objects.distance_type;
 
-        // Rotate query ONCE: q_rot = Π · query.
+        // Rotate query ONCE: q_rot = WHT(D · query), length = padded_dim.
         // All subsequent distances are computed in the rotated domain.
-        let mut q_rot = vec![0.0f32; dim];
+        let mut q_rot = vec![0.0f32; pd];
         self.tq_objects.quantizer.rotation.mul(query, &mut q_rot);
 
-        let mut dequant_buf = vec![0.0f32; dim];
+        let mut dequant_buf = vec![0.0f32; pd];
 
         // Compute seed distances in rotated domain.
         for seed in seeds.iter_mut() {
