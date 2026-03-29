@@ -1,10 +1,9 @@
 /// Port of NGT/PrimitiveComparatorNoArch.h + NGT/PrimitiveComparator.h
 ///
-/// Phase 1: scalar (no-arch) implementations only, operating on `f32` objects.
-/// The C++ template functions use a `double` accumulator internally for
-/// precision; we mirror that exactly.
-///
-/// Phase 2 will add SIMD variants behind `#[cfg(target_arch = "x86_64")]`.
+/// Scalar baseline + NEON SIMD (aarch64) for hot-path distance functions.
+/// The C++ template functions use a `double` accumulator internally; the SIMD
+/// paths use `f32` NEON lanes for throughput and promote to `f64` only for
+/// the final reduction — this is sufficient precision for ANN search.
 
 // ---------------------------------------------------------------------------
 // DistanceType  (NGT::ObjectSpace::DistanceType)
@@ -98,11 +97,18 @@ pub fn requires_normalization(dt: DistanceType) -> bool {
 #[inline]
 pub fn compare_dot_product(a: &[f32], b: &[f32]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    let mut sum = 0.0f64;
-    for (&ai, &bi) in a.iter().zip(b.iter()) {
-        sum += (ai as f64) * (bi as f64);
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::dot_product_neon(a, b)
     }
-    sum
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut sum = 0.0f64;
+        for (&ai, &bi) in a.iter().zip(b.iter()) {
+            sum += (ai as f64) * (bi as f64);
+        }
+        sum
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -113,26 +119,30 @@ pub fn compare_dot_product(a: &[f32], b: &[f32]) -> f64 {
 /// Maps to `PrimitiveComparator::compareL2(const float*, const float*, size_t)`.
 pub fn compare_l2(a: &[f32], b: &[f32]) -> f64 {
     debug_assert_eq!(a.len(), b.len());
-    let size = a.len();
-    let mut d = 0.0f64;
-    let mut i = 0usize;
-
-    // Unrolled loop: process 4 elements at a time.
-    while i + 4 <= size {
-        let diff0 = (a[i]     as f64) - (b[i]     as f64);
-        let diff1 = (a[i + 1] as f64) - (b[i + 1] as f64);
-        let diff2 = (a[i + 2] as f64) - (b[i + 2] as f64);
-        let diff3 = (a[i + 3] as f64) - (b[i + 3] as f64);
-        d += diff0 * diff0 + diff1 * diff1 + diff2 * diff2 + diff3 * diff3;
-        i += 4;
+    #[cfg(target_arch = "aarch64")]
+    {
+        neon::l2_neon(a, b).sqrt()
     }
-    // Tail.
-    while i < size {
-        let diff = (a[i] as f64) - (b[i] as f64);
-        d += diff * diff;
-        i += 1;
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let size = a.len();
+        let mut d = 0.0f64;
+        let mut i = 0usize;
+        while i + 4 <= size {
+            let diff0 = (a[i]     as f64) - (b[i]     as f64);
+            let diff1 = (a[i + 1] as f64) - (b[i + 1] as f64);
+            let diff2 = (a[i + 2] as f64) - (b[i + 2] as f64);
+            let diff3 = (a[i + 3] as f64) - (b[i + 3] as f64);
+            d += diff0 * diff0 + diff1 * diff1 + diff2 * diff2 + diff3 * diff3;
+            i += 4;
+        }
+        while i < size {
+            let diff = (a[i] as f64) - (b[i] as f64);
+            d += diff * diff;
+            i += 1;
+        }
+        d.sqrt()
     }
-    d.sqrt()
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +423,124 @@ fn bytecast_u32(bytes: &[u8]) -> &[u32] {
     debug_assert!(prefix.is_empty(), "bytecast_u32: unaligned input");
     debug_assert!(suffix.is_empty(), "bytecast_u32: length not a multiple of 4");
     words
+}
+
+// ---------------------------------------------------------------------------
+// NEON SIMD implementations (aarch64)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use std::arch::aarch64::*;
+
+    /// Dot product using NEON: process 16 f32s per iteration (4 accumulators).
+    #[inline]
+    pub fn dot_product_neon(a: &[f32], b: &[f32]) -> f64 {
+        let size = a.len();
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        let mut i = 0usize;
+
+        unsafe {
+            let mut sum0 = vdupq_n_f32(0.0);
+            let mut sum1 = vdupq_n_f32(0.0);
+            let mut sum2 = vdupq_n_f32(0.0);
+            let mut sum3 = vdupq_n_f32(0.0);
+
+            // Process 16 elements per iteration.
+            while i + 16 <= size {
+                let a0 = vld1q_f32(ap.add(i));
+                let b0 = vld1q_f32(bp.add(i));
+                sum0 = vfmaq_f32(sum0, a0, b0);
+
+                let a1 = vld1q_f32(ap.add(i + 4));
+                let b1 = vld1q_f32(bp.add(i + 4));
+                sum1 = vfmaq_f32(sum1, a1, b1);
+
+                let a2 = vld1q_f32(ap.add(i + 8));
+                let b2 = vld1q_f32(bp.add(i + 8));
+                sum2 = vfmaq_f32(sum2, a2, b2);
+
+                let a3 = vld1q_f32(ap.add(i + 12));
+                let b3 = vld1q_f32(bp.add(i + 12));
+                sum3 = vfmaq_f32(sum3, a3, b3);
+
+                i += 16;
+            }
+
+            // Process 4 elements at a time.
+            while i + 4 <= size {
+                let a0 = vld1q_f32(ap.add(i));
+                let b0 = vld1q_f32(bp.add(i));
+                sum0 = vfmaq_f32(sum0, a0, b0);
+                i += 4;
+            }
+
+            // Reduce: sum all 4 accumulators into one.
+            sum0 = vaddq_f32(sum0, sum1);
+            sum2 = vaddq_f32(sum2, sum3);
+            sum0 = vaddq_f32(sum0, sum2);
+            let mut result = vaddvq_f32(sum0) as f64;
+
+            // Scalar tail.
+            while i < size {
+                result += (*ap.add(i) as f64) * (*bp.add(i) as f64);
+                i += 1;
+            }
+            result
+        }
+    }
+
+    /// L2 squared distance using NEON: process 16 f32s per iteration.
+    /// Returns the SQUARED distance (caller takes sqrt).
+    #[inline]
+    pub fn l2_neon(a: &[f32], b: &[f32]) -> f64 {
+        let size = a.len();
+        let ap = a.as_ptr();
+        let bp = b.as_ptr();
+        let mut i = 0usize;
+
+        unsafe {
+            let mut sum0 = vdupq_n_f32(0.0);
+            let mut sum1 = vdupq_n_f32(0.0);
+            let mut sum2 = vdupq_n_f32(0.0);
+            let mut sum3 = vdupq_n_f32(0.0);
+
+            while i + 16 <= size {
+                let d0 = vsubq_f32(vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+                sum0 = vfmaq_f32(sum0, d0, d0);
+
+                let d1 = vsubq_f32(vld1q_f32(ap.add(i + 4)), vld1q_f32(bp.add(i + 4)));
+                sum1 = vfmaq_f32(sum1, d1, d1);
+
+                let d2 = vsubq_f32(vld1q_f32(ap.add(i + 8)), vld1q_f32(bp.add(i + 8)));
+                sum2 = vfmaq_f32(sum2, d2, d2);
+
+                let d3 = vsubq_f32(vld1q_f32(ap.add(i + 12)), vld1q_f32(bp.add(i + 12)));
+                sum3 = vfmaq_f32(sum3, d3, d3);
+
+                i += 16;
+            }
+
+            while i + 4 <= size {
+                let d0 = vsubq_f32(vld1q_f32(ap.add(i)), vld1q_f32(bp.add(i)));
+                sum0 = vfmaq_f32(sum0, d0, d0);
+                i += 4;
+            }
+
+            sum0 = vaddq_f32(sum0, sum1);
+            sum2 = vaddq_f32(sum2, sum3);
+            sum0 = vaddq_f32(sum0, sum2);
+            let mut result = vaddvq_f32(sum0) as f64;
+
+            while i < size {
+                let diff = (*ap.add(i) as f64) - (*bp.add(i) as f64);
+                result += diff * diff;
+                i += 1;
+            }
+            result
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
