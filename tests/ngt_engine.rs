@@ -14,7 +14,7 @@ fn test_basic_insert_search() {
     assert_eq!(index.insert(&[0.0, 1.0]).unwrap(), 3);
     assert_eq!(index.insert(&[1.0, 1.0]).unwrap(), 4);
 
-    index.build_index();
+    index.build();
 
     let options = SearchOptions {
         k: 2,
@@ -38,7 +38,7 @@ fn test_save_open() {
     let mut index = Index::create("./target/ngt_test_save", property).unwrap();
     index.insert(&[0.0, 0.0]).unwrap();
     index.insert(&[1.0, 1.0]).unwrap();
-    index.build_index();
+    index.build();
     index.save(Some("./target/ngt_test_save.bin")).unwrap();
 
     let loaded = Index::open("./target/ngt_test_save.bin").unwrap();
@@ -56,7 +56,7 @@ fn test_cosine_normalizes_inserted_objects_and_queries() {
     let mut index = Index::create("./target/ngt_test_cosine", property).unwrap();
     assert_eq!(index.insert(&[10.0, 0.0]).unwrap(), 1);
     assert_eq!(index.insert(&[0.0, 5.0]).unwrap(), 2);
-    index.build_index();
+    index.build();
 
     let options = SearchOptions {
         k: 1,
@@ -94,7 +94,7 @@ fn test_save_open_directory_directory_layout() {
     index.insert(&[1.0, 0.0]).unwrap();
     index.insert(&[0.0, 1.0]).unwrap();
     index.insert(&[1.0, 1.0]).unwrap();
-    index.build_index();
+    index.build();
     index.save_as_directory("./target/ngt_dir").unwrap();
 
     let loaded = Index::open_directory("./target/ngt_dir").unwrap();
@@ -119,7 +119,7 @@ fn test_identical_object_directed_edge_behavior() {
     index.insert(&[1.0, 0.0]).unwrap();
     index.insert(&[1.0, 0.0]).unwrap();
     index.insert(&[0.0, 1.0]).unwrap();
-    index.build_index();
+    index.build();
 
     assert!(
         !index.graph.edges[1]
@@ -146,7 +146,7 @@ fn test_tree_splits_and_returns_leaf_seeds() {
     index.insert(&[0.0, 1.0]).unwrap();
     index.insert(&[10.0, 10.0]).unwrap();
     index.insert(&[10.0, 11.0]).unwrap();
-    index.build_index();
+    index.build();
 
     let tree = index.tree.as_ref().expect("tree must exist");
     let object_space = index.object_space.as_ref().expect("object space");
@@ -168,7 +168,7 @@ fn test_graph_only_build_does_not_create_tree() {
     index.insert(&[0.0, 0.0]).unwrap();
     index.insert(&[1.0, 0.0]).unwrap();
     index.insert(&[0.0, 1.0]).unwrap();
-    index.build_index();
+    index.build();
 
     assert!(index.tree.is_none());
     assert_eq!(index.graph.edges.len(), 3);
@@ -187,7 +187,7 @@ fn test_tree_guided_insertion_uses_current_object_leaf() {
     index.insert(&[0.0, 1.0]).unwrap();
     index.insert(&[10.0, 10.0]).unwrap();
     index.insert(&[10.0, 11.0]).unwrap();
-    index.build_index();
+    index.build();
 
     assert_eq!(index.graph.edges[3][0].id, 3);
 }
@@ -206,7 +206,7 @@ fn test_parallel_batch_build_produces_graph() {
     index.insert(&[0.0, 1.0]).unwrap();
     index.insert(&[1.0, 1.0]).unwrap();
     index.insert(&[2.0, 2.0]).unwrap();
-    index.build_index();
+    index.build();
 
     assert_eq!(index.graph.edges.len(), 5);
     assert!(index.graph.edges.iter().map(Vec::len).sum::<usize>() > 0);
@@ -223,7 +223,7 @@ fn test_save_open_mmap_directory_layout() {
     index.insert(&[1.0, 0.0]).unwrap();
     index.insert(&[0.0, 1.0]).unwrap();
     index.insert(&[1.0, 1.0]).unwrap();
-    index.build_index();
+    index.build();
     index.save_as_mmap("./target/ngt_mmap_dir").unwrap();
 
     let loaded = MmapIndex::open("./target/ngt_mmap_dir").unwrap();
@@ -239,4 +239,126 @@ fn test_save_open_mmap_directory_layout() {
 
     let linear = loaded.linear_search(&[0.0, 2.0], 1).unwrap();
     assert_eq!(linear[0].id, 2);
+}
+
+#[test]
+fn test_delete_batch_rebuilds_and_compacts_ids() {
+    let mut property = IndexProperty::new(2);
+    property.edge_size_for_creation = 4;
+    property.edge_size_for_search = 4;
+
+    let mut index = Index::create("./target/ngt_delete_many", property).unwrap();
+    index.insert(&[0.0, 0.0]).unwrap(); // id 1
+    index.insert(&[10.0, 10.0]).unwrap(); // id 2
+    index.insert(&[0.0, 1.0]).unwrap(); // id 3
+    index.insert(&[10.0, 11.0]).unwrap(); // id 4
+    index.build();
+
+    let removed = index.delete_batch(&[4, 2, 4]).unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(index.object_count(), 2);
+    assert_eq!(index.all_objects(), vec![vec![0.0, 0.0], vec![0.0, 1.0]]);
+
+    let options = SearchOptions {
+        k: 1,
+        epsilon: 0.0,
+        edge_size: Some(4),
+    };
+    let result = index.search(&[0.0, 0.9], &options).unwrap();
+    assert_eq!(result[0].id, 2);
+}
+
+#[test]
+fn test_delete_batch_rejects_out_of_range_ids() {
+    let mut property = IndexProperty::new(2);
+    property.edge_size_for_creation = 3;
+    property.edge_size_for_search = 3;
+
+    let mut index = Index::create("./target/ngt_delete_invalid", property).unwrap();
+    index.insert(&[0.0, 0.0]).unwrap();
+    index.insert(&[1.0, 1.0]).unwrap();
+    index.build();
+
+    let err = index.delete_batch(&[0]).unwrap_err();
+    assert!(err.contains("out of range"));
+    assert_eq!(index.object_count(), 2);
+}
+
+#[test]
+fn test_insert_and_rebuild_allows_immediate_search() {
+    let mut property = IndexProperty::new(2);
+    property.edge_size_for_creation = 4;
+    property.edge_size_for_search = 4;
+
+    let mut index = Index::create("./target/ngt_insert_rebuild", property).unwrap();
+    index.insert_and_rebuild(&[0.0, 0.0]).unwrap();
+    index.insert_and_rebuild(&[1.0, 0.0]).unwrap();
+    index.insert_and_rebuild(&[0.0, 1.0]).unwrap();
+
+    let options = SearchOptions {
+        k: 1,
+        epsilon: 0.0,
+        edge_size: Some(4),
+    };
+    let result = index.search(&[0.9, 0.0], &options).unwrap();
+    assert_eq!(result[0].id, 2);
+}
+
+#[test]
+fn test_batch_mutation_api_insert_delete_build() {
+    let mut property = IndexProperty::new(2);
+    property.edge_size_for_creation = 4;
+    property.edge_size_for_search = 4;
+
+    let mut index = Index::create("./target/ngt_batch_mutation_api", property).unwrap();
+    let inserted = index
+        .insert_batch(&[
+            vec![0.0, 0.0],
+            vec![1.0, 0.0],
+            vec![0.0, 1.0],
+            vec![10.0, 10.0],
+        ])
+        .unwrap();
+    assert_eq!(inserted, vec![1, 2, 3, 4]);
+
+    let options = SearchOptions {
+        k: 1,
+        epsilon: 0.0,
+        edge_size: Some(4),
+    };
+    let before_delete = index.search(&[0.9, 0.1], &options).unwrap();
+    assert_eq!(before_delete[0].id, 2);
+
+    let removed = index.delete_batch(&[4]).unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(index.object_count(), 3);
+
+    let after_delete = index.search(&[0.1, 0.9], &options).unwrap();
+    assert_eq!(after_delete[0].id, 3);
+}
+
+#[test]
+fn test_batch_build_toggle_false_requires_manual_build() {
+    let mut property = IndexProperty::new(2);
+    property.edge_size_for_creation = 4;
+    property.edge_size_for_search = 4;
+
+    let mut index = Index::create("./target/ngt_batch_build_toggle", property).unwrap();
+    index.set_batch_auto_build(false);
+    index
+        .insert_batch(&[vec![0.0, 0.0], vec![1.0, 0.0], vec![0.0, 1.0]])
+        .unwrap();
+
+    assert_eq!(index.object_count(), 3);
+    assert_eq!(index.graph.edges.iter().map(Vec::len).sum::<usize>(), 0);
+
+    index.build();
+
+    let options = SearchOptions {
+        k: 1,
+        epsilon: 0.0,
+        edge_size: Some(4),
+    };
+    let result = index.search(&[0.9, 0.0], &options).unwrap();
+    assert_eq!(result[0].id, 2);
 }
