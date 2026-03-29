@@ -234,8 +234,17 @@ impl ObjectSpace {
     }
 
     // -----------------------------------------------------------------------
-    // Serialization — NGT binary format (unchanged)
+    // Serialization — flat mmap-friendly format
     // -----------------------------------------------------------------------
+    //
+    // Layout (all little-endian):
+    //   [8 bytes]  u64  slot_count
+    //   [8 bytes]  u64  dim
+    //   [slot_count * dim * 4 bytes]  f32 data (contiguous, slot 0 = zeroed)
+    //   [slot_count bytes]  presence bitmap (0 = absent, 1 = present)
+    //
+    // This is the exact in-memory layout — write/read is a bulk memcpy.
+    // MmapIndex can mmap this file directly (zero-copy).
 
     pub fn serialize(&self, path: &str) -> Result<(), NgtError> {
         let f = std::fs::File::create(path)
@@ -245,25 +254,27 @@ impl ObjectSpace {
     }
 
     pub fn write_to<W: Write>(&self, w: &mut W) -> Result<(), NgtError> {
-        let slot_count = self.slot_count as u64;
-        w.write_all(&slot_count.to_le_bytes())
+        // Header.
+        w.write_all(&(self.slot_count as u64).to_le_bytes())
+            .map_err(|e| format!("ObjectSpace::write_to: {}", e))?;
+        w.write_all(&(self.dim as u64).to_le_bytes())
             .map_err(|e| format!("ObjectSpace::write_to: {}", e))?;
 
-        for idx in 0..self.slot_count {
-            if idx == 0 || !self.present[idx] {
-                w.write_all(&[b'-'])
-                    .map_err(|e| format!("ObjectSpace::write_to: {}", e))?;
-            } else {
-                w.write_all(&[b'+'])
-                    .map_err(|e| format!("ObjectSpace::write_to: {}", e))?;
-                let start = idx * self.dim;
-                let obj = &self.data[start..start + self.dim];
-                for &f in obj {
-                    w.write_all(&f.to_le_bytes())
-                        .map_err(|e| format!("ObjectSpace::write_to: {}", e))?;
-                }
-            }
-        }
+        // Bulk write flat f32 data.
+        let byte_slice = unsafe {
+            std::slice::from_raw_parts(
+                self.data.as_ptr() as *const u8,
+                self.data.len() * 4,
+            )
+        };
+        w.write_all(byte_slice)
+            .map_err(|e| format!("ObjectSpace::write_to data: {}", e))?;
+
+        // Presence bitmap.
+        let bitmap: Vec<u8> = self.present.iter().map(|&p| if p { 1u8 } else { 0u8 }).collect();
+        w.write_all(&bitmap)
+            .map_err(|e| format!("ObjectSpace::write_to bitmap: {}", e))?;
+
         Ok(())
     }
 
@@ -275,51 +286,43 @@ impl ObjectSpace {
     }
 
     pub fn read_from<R: Read>(&mut self, r: &mut R) -> Result<(), NgtError> {
+        // Header.
         let mut buf8 = [0u8; 8];
         r.read_exact(&mut buf8)
-            .map_err(|e| format!("ObjectSpace::read_from: reading count: {}", e))?;
+            .map_err(|e| format!("ObjectSpace::read_from: header: {}", e))?;
         let slot_count = u64::from_le_bytes(buf8) as usize;
+        r.read_exact(&mut buf8)
+            .map_err(|e| format!("ObjectSpace::read_from: header: {}", e))?;
+        let dim = u64::from_le_bytes(buf8) as usize;
 
-        // Pre-allocate flat storage.
-        self.data = vec![0.0f32; slot_count * self.dim];
-        self.present = vec![false; slot_count];
-        self.slot_count = slot_count;
-        self.live_count = 0;
-
-        for i in 0..slot_count {
-            let mut type_byte = [0u8; 1];
-            r.read_exact(&mut type_byte)
-                .map_err(|e| format!("ObjectSpace::read_from: slot {} type: {}", i, e))?;
-
-            match type_byte[0] {
-                b'-' => {
-                    // Null slot — already zeroed and present[i] = false.
-                }
-                b'+' => {
-                    let byte_size = self.byte_size();
-                    let mut raw = vec![0u8; byte_size];
-                    r.read_exact(&mut raw).map_err(|e| {
-                        format!("ObjectSpace::read_from: slot {} data: {}", i, e)
-                    })?;
-
-                    let start = i * self.dim;
-                    for (j, chunk) in raw.chunks_exact(4).enumerate() {
-                        self.data[start + j] =
-                            f32::from_le_bytes(chunk.try_into().unwrap());
-                    }
-                    self.present[i] = true;
-                    if i > 0 {
-                        self.live_count += 1;
-                    }
-                }
-                other => {
-                    return Err(format!(
-                        "ObjectSpace::read_from: unexpected type byte {:?} at slot {}",
-                        other as char, i
-                    ));
-                }
-            }
+        if dim != self.dim {
+            return Err(format!(
+                "ObjectSpace::read_from: dimension mismatch: file={} expected={}",
+                dim, self.dim
+            ));
         }
+
+        // Bulk read flat f32 data.
+        let total_floats = slot_count * dim;
+        self.data = vec![0.0f32; total_floats];
+        let byte_slice = unsafe {
+            std::slice::from_raw_parts_mut(
+                self.data.as_mut_ptr() as *mut u8,
+                total_floats * 4,
+            )
+        };
+        r.read_exact(byte_slice)
+            .map_err(|e| format!("ObjectSpace::read_from data: {}", e))?;
+
+        // Presence bitmap.
+        let mut bitmap = vec![0u8; slot_count];
+        r.read_exact(&mut bitmap)
+            .map_err(|e| format!("ObjectSpace::read_from bitmap: {}", e))?;
+
+        self.present = bitmap.iter().map(|&b| b != 0).collect();
+        self.slot_count = slot_count;
+        self.live_count = self.present.iter().skip(1).filter(|&&p| p).count();
+
         Ok(())
     }
 

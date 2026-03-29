@@ -10,14 +10,15 @@ import h5py
 import numpy as np
 
 
+import argparse
+
 ROOT = Path(__file__).resolve().parent.parent
 MUNIND_BIN = ROOT / "target/release/munind"
-INDEX_PATH = ROOT / "benches/indexes/glove-100-angular-munind"
+DEFAULT_INDEX = ROOT / "benches/indexes/glove-100-angular-munind"
 QUERY_PATH = ROOT / "benches/data/glove-100-angular.test.tsv"
 HDF5_PATH = ROOT / "benches/data/glove-100-angular.hdf5"
 
 TOP_K = 10
-#EPSILONS = [0.2]
 EPSILONS = [0.1, 0.4]
 
 
@@ -114,6 +115,12 @@ def recall_at_k(found: np.ndarray, truth: np.ndarray) -> float:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-i", "--index", type=str, default=str(DEFAULT_INDEX),
+                        help="Path to munind index directory")
+    args = parser.parse_args()
+    INDEX_PATH = Path(args.index)
+
     if not MUNIND_BIN.exists():
         raise SystemExit(
             f"munind binary not found: {MUNIND_BIN}\n"

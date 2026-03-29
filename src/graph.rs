@@ -16,25 +16,25 @@ use crate::object_space::ObjectSpace;
 // BooleanVector — visited set matching C++ NGT::BooleanVector
 // ---------------------------------------------------------------------------
 
-struct BooleanVector {
+pub struct BooleanVector {
     data: Vec<bool>,
 }
 
 impl BooleanVector {
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
             data: vec![false; size],
         }
     }
 
     #[inline]
-    fn contains(&self, id: u32) -> bool {
+    pub fn contains(&self, id: u32) -> bool {
         let idx = id as usize;
         idx < self.data.len() && self.data[idx]
     }
 
     #[inline]
-    fn insert(&mut self, id: u32) {
+    pub fn insert(&mut self, id: u32) {
         let idx = id as usize;
         if idx < self.data.len() {
             self.data[idx] = true;
@@ -47,7 +47,7 @@ impl BooleanVector {
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn prefetch_read<T>(ptr: *const T) {
+pub fn prefetch_read<T>(ptr: *const T) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
@@ -153,17 +153,10 @@ impl Default for GraphProperty {
 /// whether truncation is needed.
 pub struct NeighborhoodGraph {
     /// Adjacency lists (1-based).  `nodes[0]` = None.
-    /// Used during build (dynamic adds/removes).
     pub nodes: Vec<Option<Vec<ObjectDistance>>>,
     /// Per-node previous size (for truncation).  Index 0 unused.
     pub prevsize: Vec<u16>,
     pub property: GraphProperty,
-
-    /// Flat CSR (Compressed Sparse Row) layout — populated after build via
-    /// `compact()`.  All edges contiguous in one allocation for cache-friendly
-    /// search traversal.
-    pub(crate) flat_offsets: Option<Vec<u32>>,
-    pub(crate) flat_edges: Option<Vec<ObjectDistance>>,
 }
 
 impl NeighborhoodGraph {
@@ -172,8 +165,6 @@ impl NeighborhoodGraph {
             nodes: vec![None], // slot 0
             prevsize: vec![0],
             property: GraphProperty::default(),
-            flat_offsets: None,
-            flat_edges: None,
         }
     }
 
@@ -182,8 +173,6 @@ impl NeighborhoodGraph {
             nodes: vec![None],
             prevsize: vec![0],
             property: prop,
-            flat_offsets: None,
-            flat_edges: None,
         }
     }
 
@@ -192,33 +181,8 @@ impl NeighborhoodGraph {
         self.nodes.len()
     }
 
-    /// Compact all edge lists into a flat CSR layout for cache-friendly search.
-    /// Call this after build is complete, before search.
-    pub fn compact(&mut self) {
-        let n = self.nodes.len();
-        let mut offsets = Vec::with_capacity(n + 1);
-        let total_edges: usize = self.nodes.iter()
-            .map(|opt| opt.as_ref().map_or(0, |v| v.len()))
-            .sum();
-        let mut edges = Vec::with_capacity(total_edges);
-
-        for slot in &self.nodes {
-            offsets.push(edges.len() as u32);
-            if let Some(node_edges) = slot {
-                edges.extend_from_slice(node_edges);
-            }
-        }
-        offsets.push(edges.len() as u32);
-
-        self.flat_offsets = Some(offsets);
-        self.flat_edges = Some(edges);
-    }
-
-    /// Invalidate the flat CSR layout (call before mutating the graph).
-    fn invalidate_compact(&mut self) {
-        self.flat_offsets = None;
-        self.flat_edges = None;
-    }
+    /// No-op (CSR removed — was net-negative for this workload).
+    pub fn compact(&mut self) {}
 
     pub fn is_empty_node(&self, id: ObjectID) -> bool {
         let idx = id as usize;
@@ -226,23 +190,9 @@ impl NeighborhoodGraph {
     }
 
     /// Get the adjacency list for node `id`.
-    /// Uses flat CSR layout if available (after `compact()`), otherwise
-    /// falls back to the per-node Vec.
     #[inline]
     pub fn get_node(&self, id: ObjectID) -> Option<&[ObjectDistance]> {
-        let idx = id as usize;
-        if let (Some(offsets), Some(edges)) = (&self.flat_offsets, &self.flat_edges) {
-            if idx + 1 < offsets.len() {
-                let start = offsets[idx] as usize;
-                let end = offsets[idx + 1] as usize;
-                if start == end && self.nodes.get(idx).map_or(true, |n| n.is_none()) {
-                    return None;
-                }
-                return Some(&edges[start..end]);
-            }
-            return None;
-        }
-        self.nodes.get(idx).and_then(|o| o.as_ref()).map(|v| v.as_slice())
+        self.nodes.get(id as usize).and_then(|o| o.as_ref()).map(|v| v.as_slice())
     }
 
     /// Get mutable adjacency list for node `id`.
@@ -327,7 +277,6 @@ impl NeighborhoodGraph {
     /// Store an adjacency list for `id`.
     /// Maps to `GraphRepository::insert`.
     pub fn insert_node(&mut self, id: ObjectID, edges: Vec<ObjectDistance>) {
-        self.invalidate_compact();
         let idx = id as usize;
         if idx >= self.nodes.len() {
             self.nodes.resize_with(idx + 1, || None);

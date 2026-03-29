@@ -147,15 +147,9 @@ impl MmapIndex {
 
         let dt = property.to_distance_type();
 
-        // Open mmap objects. Try obj.mmap first, fall back to loading obj into RAM.
-        let mmap_path = format!("{}/obj.mmap", dir);
-        let objects = if std::path::Path::new(&mmap_path).exists() {
-            MmapObjectSpace::open(&mmap_path, dt)?
-        } else {
-            // Fallback: load traditional obj file into an ObjectSpace, then
-            // save as mmap temp and re-open. This is a compatibility path.
-            return Self::open_fallback(dir, property);
-        };
+        // Mmap the obj file directly — same flat format as ObjectSpace.
+        let obj_path = format!("{}/obj", dir);
+        let objects = MmapObjectSpace::open(&obj_path, dt)?;
 
         let gp = GraphProperty {
             truncation_threshold: property.truncation_threshold,
@@ -171,81 +165,6 @@ impl MmapIndex {
         };
         let mut graph = NeighborhoodGraph::with_property(gp);
         graph.deserialize_from_file(&format!("{}/grp", dir))?;
-        graph.compact();
-
-        let tree = if std::path::Path::new(&format!("{}/tre", dir)).exists() {
-            let mut t = DVPTree::new(property.leaf_node_size, property.internal_children_size);
-            t.deserialize_from_file(&format!("{}/tre", dir), property.dimension)?;
-            Some(t)
-        } else {
-            None
-        };
-
-        Ok(MmapIndex {
-            objects,
-            graph,
-            tree,
-            property,
-        })
-    }
-
-    /// Fallback: load traditional directory format into RAM-backed ObjectSpace,
-    /// then wrap in a compatibility shim.
-    fn open_fallback(dir: &str, property: IndexProperty) -> Result<Self, NgtError> {
-        let dt = property.to_distance_type();
-        let mut os = ObjectSpace::new(property.dimension, dt);
-        os.deserialize(&format!("{}/obj", dir))?;
-
-        // Write a temporary mmap file and re-open.
-        let mmap_path = format!("{}/obj.mmap", dir);
-        {
-            let f = std::fs::File::create(&mmap_path)
-                .map_err(|e| format!("mmap fallback: {}", e))?;
-            let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
-
-            use std::io::Write;
-            let slot_count = os.size() as u64;
-            let dim = os.dim as u64;
-            w.write_all(&slot_count.to_le_bytes()).map_err(|e| format!("{}", e))?;
-            w.write_all(&dim.to_le_bytes()).map_err(|e| format!("{}", e))?;
-
-            for idx in 0..os.size() {
-                if os.is_present(idx as ObjectID) {
-                    let obj = os.get_object(idx as ObjectID).unwrap();
-                    for &v in obj {
-                        w.write_all(&v.to_le_bytes()).map_err(|e| format!("{}", e))?;
-                    }
-                } else {
-                    for _ in 0..os.dim {
-                        w.write_all(&0.0f32.to_le_bytes()).map_err(|e| format!("{}", e))?;
-                    }
-                }
-            }
-            for idx in 0..os.size() {
-                let byte: u8 = if idx > 0 && os.is_present(idx as ObjectID) { 1 } else { 0 };
-                w.write_all(&[byte]).map_err(|e| format!("{}", e))?;
-            }
-        }
-        drop(os);
-
-        // Now re-open with mmap.
-        let objects = MmapObjectSpace::open(&mmap_path, dt)?;
-
-        let gp = GraphProperty {
-            truncation_threshold: property.truncation_threshold,
-            edge_size_for_creation: property.edge_size_for_creation,
-            edge_size_for_search: property.edge_size_for_search,
-            insertion_radius_coefficient: property.insertion_radius_coefficient,
-            seed_size: property.seed_size,
-            graph_type: property.graph_type,
-            batch_size_for_creation: property.batch_size_for_creation,
-            outgoing_edge: property.outgoing_edge,
-            incoming_edge: property.incoming_edge,
-            ..GraphProperty::default()
-        };
-        let mut graph = NeighborhoodGraph::with_property(gp);
-        graph.deserialize_from_file(&format!("{}/grp", dir))?;
-        graph.compact();
 
         let tree = if std::path::Path::new(&format!("{}/tre", dir)).exists() {
             let mut t = DVPTree::new(property.leaf_node_size, property.internal_children_size);

@@ -1,10 +1,12 @@
 pub mod common;
+pub mod f16;
 pub mod graph;
 pub mod index;
 pub mod mmap_index;
 pub mod node;
 pub mod object_space;
 pub mod primitive_comparator;
+pub mod tq;
 pub mod tree;
 
 pub use common::{Distance, NgtError, ObjectDistance, ObjectID, SearchOptions, SearchResult};
