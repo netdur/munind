@@ -22,21 +22,25 @@ Loaded ground truth: 10000 queries, top-10
 
 munind
 
-(base) adel@192 munind % time target/release/munind create \
+(base) adel@192 munind % time target/release/munind create \  
   -d 100 \
   -D c \
   benches/indexes/glove-100-angular-munind \
   benches/data/glove-100-angular.train.tsv
+Reading benches/data/glove-100-angular.train.tsv... 1183514 vectors in 4.40s
+Inserting... done in 0.24s
+Building index... done in 109.73s
+Saving index... done in 0.38s
 munind: created index at benches/indexes/glove-100-angular-munind with 1183514 objects
-target/release/munind create -d 100 -D c    225.43s user 27.48s system 434% cpu 58.237 total
+target/release/munind create -d 100 -D c    697.24s user 37.25s system 636% cpu 1:55.34 total
 (base) adel@192 munind % python3 scripts/eval_munind_recall.py
 Loaded ground truth: 10000 queries, top-10
 
 -e 0.1
-  recall@10: 0.622100
-  avg_query_ms: 0.211457
+  recall@10: 0.635250
+  avg_query_ms: 0.257562
 
 -e 0.4
-  recall@10: 0.981760
-  avg_query_ms: 12.146029
+  recall@10: 0.986620
+  avg_query_ms: 16.603397
 

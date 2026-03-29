@@ -23,10 +23,13 @@ fn test_basic_insert_search() {
     };
     let res = index.search(&[0.9, 0.9], &options).expect("search");
     assert!(!res.is_empty());
-    assert_eq!(res[0].id, 4);
+    let id = res[0].id;
+    assert_eq!(id, 4);
 
     let brute = index.linear_search(&[0.9, 0.9], 2).expect("linear");
-    assert_eq!(res[0].id, brute[0].id);
+    let res_id = res[0].id;
+    let brute_id = brute[0].id;
+    assert_eq!(res_id, brute_id);
 }
 
 #[test]
@@ -64,7 +67,8 @@ fn test_cosine_normalizes_inserted_objects_and_queries() {
         edge_size: Some(4),
     };
     let res = index.search(&[2.0, 0.0], &options).unwrap();
-    assert_eq!(res[0].id, 1);
+    let id = res[0].id;
+    assert_eq!(id, 1);
 
     let stored = index.object_space.as_ref().unwrap().get_object(1).unwrap();
     assert!((stored[0] - 1.0).abs() < 1e-6);
@@ -107,7 +111,8 @@ fn test_save_open_directory_directory_layout() {
         edge_size: Some(3),
     };
     let result = loaded.search(&[2.0, 0.0], &options).unwrap();
-    assert_eq!(result[0].id, 1);
+    let id = result[0].id;
+    assert_eq!(id, 1);
 }
 
 #[test]
@@ -124,12 +129,12 @@ fn test_identical_object_directed_edge_behavior() {
     assert!(
         !index.graph.edges[1]
             .iter()
-            .any(|edge| edge.id == 1 && edge.distance == 0.0)
+            .any(|edge| { let eid = edge.id; let ed = edge.distance; eid == 1 && ed == 0.0 })
     );
     assert!(
         index.graph.edges[0]
             .iter()
-            .any(|edge| edge.id == 2 && edge.distance == 0.0)
+            .any(|edge| { let eid = edge.id; let ed = edge.distance; eid == 2 && ed == 0.0 })
     );
 }
 
@@ -154,8 +159,10 @@ fn test_tree_splits_and_returns_leaf_seeds() {
     let seeds = tree.get_object_ids_from_leaf(leaf_id);
 
     assert!(tree.leaves.iter().flatten().count() >= 2);
-    assert!(seeds.iter().any(|seed| seed.id == 3));
-    assert!(seeds.iter().any(|seed| seed.id == 4));
+    let has_3 = seeds.iter().any(|seed| { let sid = seed.id; sid == 3 });
+    let has_4 = seeds.iter().any(|seed| { let sid = seed.id; sid == 4 });
+    assert!(has_3);
+    assert!(has_4);
 }
 
 #[test]
@@ -189,7 +196,8 @@ fn test_tree_guided_insertion_uses_current_object_leaf() {
     index.insert(&[10.0, 11.0]).unwrap();
     index.build();
 
-    assert_eq!(index.graph.edges[3][0].id, 3);
+    let edge_id = index.graph.edges[3][0].id;
+    assert_eq!(edge_id, 3);
 }
 
 #[test]
@@ -235,10 +243,12 @@ fn test_save_open_mmap_directory_layout() {
         edge_size: Some(3),
     };
     let result = loaded.search(&[2.0, 0.0], &options).unwrap();
-    assert_eq!(result[0].id, 1);
+    let id = result[0].id;
+    assert_eq!(id, 1);
 
     let linear = loaded.linear_search(&[0.0, 2.0], 1).unwrap();
-    assert_eq!(linear[0].id, 2);
+    let lid = linear[0].id;
+    assert_eq!(lid, 2);
 }
 
 #[test]
@@ -265,7 +275,8 @@ fn test_delete_batch_rebuilds_and_compacts_ids() {
         edge_size: Some(4),
     };
     let result = index.search(&[0.0, 0.9], &options).unwrap();
-    assert_eq!(result[0].id, 2);
+    let id = result[0].id;
+    assert_eq!(id, 2);
 }
 
 #[test]
@@ -301,7 +312,8 @@ fn test_insert_and_rebuild_allows_immediate_search() {
         edge_size: Some(4),
     };
     let result = index.search(&[0.9, 0.0], &options).unwrap();
-    assert_eq!(result[0].id, 2);
+    let id = result[0].id;
+    assert_eq!(id, 2);
 }
 
 #[test]
@@ -327,14 +339,16 @@ fn test_batch_mutation_api_insert_delete_build() {
         edge_size: Some(4),
     };
     let before_delete = index.search(&[0.9, 0.1], &options).unwrap();
-    assert_eq!(before_delete[0].id, 2);
+    let bd_id = before_delete[0].id;
+    assert_eq!(bd_id, 2);
 
     let removed = index.delete_batch(&[4]).unwrap();
     assert_eq!(removed, 1);
     assert_eq!(index.object_count(), 3);
 
     let after_delete = index.search(&[0.1, 0.9], &options).unwrap();
-    assert_eq!(after_delete[0].id, 3);
+    let ad_id = after_delete[0].id;
+    assert_eq!(ad_id, 3);
 }
 
 #[test]
@@ -360,5 +374,6 @@ fn test_batch_build_toggle_false_requires_manual_build() {
         edge_size: Some(4),
     };
     let result = index.search(&[0.9, 0.0], &options).unwrap();
-    assert_eq!(result[0].id, 2);
+    let id = result[0].id;
+    assert_eq!(id, 2);
 }
