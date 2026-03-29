@@ -42,13 +42,9 @@ enum Command {
         #[arg(short = 'p', long, default_value = "8")]
         threads: usize,
 
-        /// Quantize objects at given bits per dimension (0 = disabled, 1-8 = TurboQuant).
+        /// Quantize objects with TurboQuant at given bits/dim (0=off, 3/4/8=quantize).
         #[arg(short = 'q', long, default_value = "0")]
         quantize: u32,
-
-        /// Store objects as float16 (2x compression, near-zero recall loss).
-        #[arg(long = "f16", default_value = "false")]
-        use_f16: bool,
 
         /// Output index path.
         index: String,
@@ -193,7 +189,6 @@ fn cmd_create(
     truncation_threshold: usize,
     _threads: usize,
     quantize: u32,
-    use_f16: bool,
     index_path: String,
     data_path: Option<String>,
 ) -> Result<(), String> {
@@ -245,14 +240,6 @@ fn cmd_create(
             "munind: created TQ-{} index at {} with {} objects",
             quantize, index_path, tq.object_count()
         );
-    } else if use_f16 {
-        let start = Instant::now();
-        eprint!("Saving f16 index...");
-        index.save_as_directory(&index_path).map_err(|e| e.to_string())?;
-        // Convert obj to f16 format.
-        munind::f16::save_f16(&index_path).map_err(|e| e.to_string())?;
-        eprintln!(" done in {:.2}s", start.elapsed().as_secs_f64());
-        eprintln!("munind: created f16 index at {} with {} objects", index_path, index.object_count());
     } else {
         let start = Instant::now();
         eprint!("Saving index...");
@@ -275,9 +262,7 @@ fn cmd_search(
     if munind::tq::TqIndex::is_tq_index(&index_path) {
         return cmd_search_tq(result_size, epsilon, edge_size, output_mode, index_path, query_path);
     }
-    if munind::f16::F16Index::is_f16_index(&index_path) {
-        return cmd_search_f16(result_size, epsilon, edge_size, output_mode, index_path, query_path);
-    }
+
 
     let index = Index::open_directory(&index_path).map_err(|e| e.to_string())?;
     let dim = index.object_space.as_ref().ok_or("no object space")?.dim;
@@ -349,66 +334,6 @@ fn cmd_search(
         );
     }
 
-    Ok(())
-}
-
-fn cmd_search_f16(
-    result_size: usize,
-    epsilon: f32,
-    edge_size: i32,
-    output_mode: String,
-    index_path: String,
-    query_path: Option<String>,
-) -> Result<(), String> {
-    let idx = munind::f16::F16Index::load(&index_path).map_err(|e| e.to_string())?;
-    let dim = idx.property.dimension;
-    let options = SearchOptions {
-        k: result_size,
-        epsilon,
-        edge_size: if edge_size == 0 { None } else { Some(edge_size as usize) },
-    };
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::new(stdout.lock());
-    let reader: Box<dyn BufRead> = match query_path {
-        Some(path) => {
-            let file = std::fs::File::open(&path)
-                .map_err(|e| format!("Cannot open {}: {}", path, e))?;
-            Box::new(BufReader::new(file))
-        }
-        None => Box::new(BufReader::new(std::io::stdin())),
-    };
-    let mut query_count = 0u64;
-    let mut total_time = std::time::Duration::ZERO;
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Read error: {}", e))?;
-        let line = line.trim().to_string();
-        if line.is_empty() { continue; }
-        let vals: Vec<f32> = line
-            .split(|c: char| c == '\t' || c == ' ' || c == ',')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse::<f32>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("Parse error: {}", e))?;
-        if vals.len() < dim { continue; }
-        let q = &vals[..dim];
-        let start = Instant::now();
-        let results = idx.search(q, &options).map_err(|e| e.to_string())?;
-        total_time += start.elapsed();
-        query_count += 1;
-        writeln!(out, "Query No.{}", query_count).ok();
-        for (rank, r) in results.iter().enumerate() {
-            let rid: u32 = r.id;
-            let rdist: f32 = r.distance;
-            match output_mode.as_str() {
-                "i" => writeln!(out, "{}\t{}", rank + 1, rid).ok(),
-                _ => writeln!(out, "{}\t{}\t{}", rank + 1, rid, rdist).ok(),
-            };
-        }
-    }
-    if query_count > 0 {
-        let avg_ms = total_time.as_secs_f64() / query_count as f64 * 1000.0;
-        eprintln!("Average query time: {:.6} ms ({} queries, f16)", avg_ms, query_count);
-    }
     Ok(())
 }
 
@@ -492,9 +417,7 @@ fn cmd_search_mmap(
     if munind::tq::TqIndex::is_tq_index(&index_path) {
         return cmd_search_tq(result_size, epsilon, edge_size, output_mode, index_path, query_path);
     }
-    if munind::f16::F16Index::is_f16_index(&index_path) {
-        return cmd_search_f16(result_size, epsilon, edge_size, output_mode, index_path, query_path);
-    }
+
 
     let start = Instant::now();
     let index = MmapIndex::open(&index_path).map_err(|e| e.to_string())?;
@@ -616,7 +539,6 @@ fn main() {
             truncation_threshold,
             threads,
             quantize,
-            use_f16,
             index,
             data,
         } => cmd_create(
@@ -627,7 +549,6 @@ fn main() {
             truncation_threshold,
             threads,
             quantize,
-            use_f16,
             index,
             data,
         ),

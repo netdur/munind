@@ -550,11 +550,79 @@ impl TqIndex {
         Ok(())
     }
 
-    /// Asymmetric graph search in the ROTATED domain.
+    /// Build per-coordinate lookup table: `lut[i * num_levels + c] = q_rot[i] * centroid[c]`.
+    /// For NormalizedCosine: `dot = norm * Σ lut[i * L + code[i]]`, then `|1 - dot|`.
+    /// For L2: precompute `q_sq = Σ q_rot[i]²` and `c_sq[c] = centroid[c]²`, then
+    ///   `‖q - x‖² = q_sq + norm² * Σ c_sq[code[i]] - 2*norm * Σ lut[i*L + code[i]]`.
+    fn build_lut(&self, q_rot: &[f32]) -> (Vec<f32>, Vec<f32>, f32) {
+        let cb = &self.tq_objects.quantizer.codebook;
+        let nl = cb.num_levels;
+        let pd = q_rot.len();
+
+        // lut[i * nl + c] = q_rot[i] * centroid[c]
+        let mut lut = vec![0.0f32; pd * nl];
+        for i in 0..pd {
+            let qi = q_rot[i];
+            for c in 0..nl {
+                lut[i * nl + c] = qi * cb.centroids[c];
+            }
+        }
+
+        // c_sq[c] = centroid[c]²  (for L2 distance)
+        let c_sq: Vec<f32> = cb.centroids.iter().map(|&v| v * v).collect();
+
+        // q_sq = Σ q_rot[i]²
+        let q_sq: f32 = q_rot.iter().map(|&v| v * v).sum();
+
+        (lut, c_sq, q_sq)
+    }
+
+    /// Compute distance using LUT.  One table read + one add per coordinate.
+    #[inline]
+    fn lut_distance(
+        &self,
+        codes: &[u32],
+        norm: f32,
+        lut: &[f32],
+        c_sq: &[f32],
+        q_sq: f32,
+        dt: DistanceType,
+    ) -> f32 {
+        let nl = self.tq_objects.quantizer.codebook.num_levels;
+        let pd = codes.len();
+
+        match dt {
+            // NormalizedCosine: |1 - dot(q, x)| where x = norm * dequant
+            // dot = norm * Σ q_rot[i] * centroid[code[i]]
+            //     = norm * Σ lut[i * nl + code[i]]
+            DistanceType::NormalizedCosineSimilarity | DistanceType::CosineSimilarity => {
+                let mut dot = 0.0f32;
+                for i in 0..pd {
+                    dot += unsafe { *lut.get_unchecked(i * nl + codes[i] as usize) };
+                }
+                dot *= norm;
+                (1.0 - dot as f64).abs() as f32
+            }
+            // L2: ‖q - x‖ where x = norm * dequant
+            // ‖q - x‖² = q_sq + norm² * Σ c_sq[code[i]] - 2*norm * Σ lut[i*nl+code[i]]
+            _ => {
+                let mut dot_sum = 0.0f32;
+                let mut csq_sum = 0.0f32;
+                for i in 0..pd {
+                    let c = codes[i] as usize;
+                    dot_sum += unsafe { *lut.get_unchecked(i * nl + c) };
+                    csq_sum += unsafe { *c_sq.get_unchecked(c) };
+                }
+                let dist_sq = q_sq + norm * norm * csq_sum - 2.0 * norm * dot_sum;
+                if dist_sq <= 0.0 { 0.0 } else { dist_sq.sqrt() }
+            }
+        }
+    }
+
+    /// Asymmetric graph search with precomputed lookup table.
     ///
-    /// Key optimization: rotate the query ONCE, then compare directly against
-    /// dequantized codes (scalar lookups only — no d×d matrix multiply per object).
-    /// This works because rotation preserves distances: ‖Πa - Πb‖ = ‖a - b‖.
+    /// Per-query: rotate query once + build LUT (O(d × 256)).
+    /// Per-neighbor: d table reads + d adds — no dequantization, no multiply.
     fn search_asymmetric(
         &mut self,
         query: &[f32],
@@ -580,19 +648,21 @@ impl TqIndex {
         let pd = self.tq_objects.quantizer.padded_dim();
         let dt = self.tq_objects.distance_type;
 
-        // Rotate query ONCE: q_rot = WHT(D · query), length = padded_dim.
-        // All subsequent distances are computed in the rotated domain.
+        // Rotate query ONCE.
         let mut q_rot = vec![0.0f32; pd];
         self.tq_objects.quantizer.rotation.mul(query, &mut q_rot);
 
-        let mut dequant_buf = vec![0.0f32; pd];
+        // Build lookup table ONCE per query.
+        let (lut, c_sq, q_sq) = self.build_lut(&q_rot);
 
-        // Compute seed distances in rotated domain.
+        // Compute seed distances via LUT.
         for seed in seeds.iter_mut() {
             let sid: u32 = seed.id;
             if self.tq_objects.is_present(sid) {
-                if self.dequantize_rotated(sid, &mut dequant_buf).is_ok() {
-                    seed.distance = primitive_comparator::compare(&q_rot, &dequant_buf, dt);
+                let idx = sid as usize;
+                if let Some(codes) = &self.tq_objects.codes[idx] {
+                    let norm = self.tq_objects.norms[idx];
+                    seed.distance = self.lut_distance(codes, norm, &lut, &c_sq, q_sq, dt);
                 } else {
                     seed.distance = f32::MAX;
                 }
@@ -647,11 +717,13 @@ impl TqIndex {
                 if !self.tq_objects.is_present(nid) {
                     continue;
                 }
-                // Dequantize in rotated domain: O(d) scalar lookups, no matrix multiply.
-                if self.dequantize_rotated(nid, &mut dequant_buf).is_err() {
-                    continue;
-                }
-                let distance = primitive_comparator::compare(&q_rot, &dequant_buf, dt);
+                let idx = nid as usize;
+                let codes = match &self.tq_objects.codes[idx] {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let norm = self.tq_objects.norms[idx];
+                let distance = self.lut_distance(codes, norm, &lut, &c_sq, q_sq, dt);
 
                 if distance <= exploration_radius {
                     let result = ObjectDistance::new(nid, distance);

@@ -1,5 +1,4 @@
 pub mod common;
-pub mod f16;
 pub mod graph;
 pub mod index;
 pub mod mmap_index;
