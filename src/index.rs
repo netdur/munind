@@ -285,7 +285,7 @@ pub struct Index {
     pub graph: Graph,
     pub object_space: Option<ObjectSpace>,
     pub tree: Option<Tree>,
-    property: IndexProperty,
+    pub property: IndexProperty,
     path: String,
     batch_auto_build: bool,
 }
