@@ -35,10 +35,13 @@ pub struct TqObjectSpace {
     pub slot_count: usize,
     pub live_count: usize,
     /// Per-object codes: `codes[id * padded_dim .. (id+1) * padded_dim]`.
-    /// Flat contiguous storage.
     codes: Vec<u8>,
     /// Per-object per-block scales: `scales[id * num_blocks .. (id+1) * num_blocks]`.
     scales: Vec<f32>,
+    /// QJL sign bits: `qjl_signs[id * sign_bytes .. (id+1) * sign_bytes]`.
+    qjl_signs: Vec<u8>,
+    /// QJL residual norms: `gammas[id]`.
+    gammas: Vec<f32>,
     /// Presence bitmap.
     present: Vec<bool>,
     pub quantizer: TqQuantizer,
@@ -48,17 +51,24 @@ impl TqObjectSpace {
     pub fn new(quantizer: TqQuantizer, distance_type: DistanceType) -> Self {
         let pd = quantizer.padded_dim();
         let nb = quantizer.num_blocks();
+        let sb = (pd + 7) / 8;
         TqObjectSpace {
             dim: quantizer.dim,
             distance_type,
             normalization: primitive_comparator::requires_normalization(distance_type),
             slot_count: 1,
             live_count: 0,
-            codes: vec![0u8; pd],      // slot 0
-            scales: vec![0.0f32; nb],   // slot 0
+            codes: vec![0u8; pd],       // slot 0
+            scales: vec![0.0f32; nb],    // slot 0
+            qjl_signs: vec![0u8; sb],    // slot 0
+            gammas: vec![0.0f32],        // slot 0
             present: vec![false],
             quantizer,
         }
+    }
+
+    fn sign_bytes(&self) -> usize {
+        (self.quantizer.padded_dim() + 7) / 8
     }
 
     /// Quantize and insert.
@@ -67,6 +77,8 @@ impl TqObjectSpace {
         let id = self.slot_count as ObjectID;
         self.codes.extend_from_slice(&enc.codes);
         self.scales.extend_from_slice(&enc.scales);
+        self.qjl_signs.extend_from_slice(&enc.qjl_signs);
+        self.gammas.push(enc.gamma);
         self.present.push(true);
         self.slot_count += 1;
         self.live_count += 1;
@@ -77,8 +89,11 @@ impl TqObjectSpace {
     fn insert_empty(&mut self) {
         let pd = self.quantizer.padded_dim();
         let nb = self.quantizer.num_blocks();
+        let sb = self.sign_bytes();
         self.codes.extend(std::iter::repeat(0u8).take(pd));
         self.scales.extend(std::iter::repeat(0.0f32).take(nb));
+        self.qjl_signs.extend(std::iter::repeat(0u8).take(sb));
+        self.gammas.push(0.0);
         self.present.push(false);
         self.slot_count += 1;
     }
@@ -97,6 +112,20 @@ impl TqObjectSpace {
         let nb = self.quantizer.num_blocks();
         let off = id as usize * nb;
         &self.scales[off..off + nb]
+    }
+
+    /// Get QJL sign bits for object `id`.
+    #[inline]
+    fn get_qjl_signs(&self, id: ObjectID) -> &[u8] {
+        let sb = self.sign_bytes();
+        let off = id as usize * sb;
+        &self.qjl_signs[off..off + sb]
+    }
+
+    /// Get QJL gamma (residual norm) for object `id`.
+    #[inline]
+    fn get_gamma(&self, id: ObjectID) -> f32 {
+        self.gammas[id as usize]
     }
 
     pub fn is_present(&self, id: ObjectID) -> bool {
@@ -119,14 +148,26 @@ impl TqObjectSpace {
         w.write_all(&(nb as u32).to_le_bytes()).map_err(|e| format!("{}", e))?;
         w.write_all(&self.quantizer.bits.to_le_bytes()).map_err(|e| format!("{}", e))?;
 
-        // Codes: flat contiguous.
+        let sb = self.sign_bytes();
+        w.write_all(&(sb as u32).to_le_bytes()).map_err(|e| format!("{}", e))?;
+
+        // Codes.
         w.write_all(&self.codes).map_err(|e| format!("{}", e))?;
 
-        // Scales: flat contiguous.
+        // Scales.
         let scale_bytes = unsafe {
             std::slice::from_raw_parts(self.scales.as_ptr() as *const u8, self.scales.len() * 4)
         };
         w.write_all(scale_bytes).map_err(|e| format!("{}", e))?;
+
+        // QJL sign bits.
+        w.write_all(&self.qjl_signs).map_err(|e| format!("{}", e))?;
+
+        // QJL gammas.
+        let gamma_bytes = unsafe {
+            std::slice::from_raw_parts(self.gammas.as_ptr() as *const u8, self.gammas.len() * 4)
+        };
+        w.write_all(gamma_bytes).map_err(|e| format!("{}", e))?;
 
         // Presence bitmap.
         let bitmap: Vec<u8> = self.present.iter().map(|&p| if p { 1u8 } else { 0u8 }).collect();
@@ -149,6 +190,8 @@ impl TqObjectSpace {
         let nb = u32::from_le_bytes(buf4) as usize;
         r.read_exact(&mut buf4).map_err(|e| format!("{}", e))?;
         let _bits = u32::from_le_bytes(buf4);
+        r.read_exact(&mut buf4).map_err(|e| format!("{}", e))?;
+        let sb = u32::from_le_bytes(buf4) as usize;
 
         // Codes.
         let mut codes = vec![0u8; slot_count * pd];
@@ -160,6 +203,17 @@ impl TqObjectSpace {
             std::slice::from_raw_parts_mut(scales.as_mut_ptr() as *mut u8, scales.len() * 4)
         };
         r.read_exact(scale_bytes).map_err(|e| format!("{}", e))?;
+
+        // QJL sign bits.
+        let mut qjl_signs = vec![0u8; slot_count * sb];
+        r.read_exact(&mut qjl_signs).map_err(|e| format!("{}", e))?;
+
+        // QJL gammas.
+        let mut gammas = vec![0.0f32; slot_count];
+        let gamma_bytes = unsafe {
+            std::slice::from_raw_parts_mut(gammas.as_mut_ptr() as *mut u8, gammas.len() * 4)
+        };
+        r.read_exact(gamma_bytes).map_err(|e| format!("{}", e))?;
 
         // Presence.
         let mut bitmap = vec![0u8; slot_count];
@@ -175,6 +229,8 @@ impl TqObjectSpace {
             live_count,
             codes,
             scales,
+            qjl_signs,
+            gammas,
             present,
             quantizer,
         })
@@ -184,6 +240,144 @@ impl TqObjectSpace {
 // ---------------------------------------------------------------------------
 // TqIndex
 // ---------------------------------------------------------------------------
+
+/// Precomputed QJL query state: total sum + pointer to q_qjl data.
+/// `dot(q, ±1) = 2 * sum_where_bit_is_1(q) - sum_all(q)`
+/// `sum_all` is precomputed once. Per neighbor: just compute the masked sum.
+struct QjlQueryState {
+    /// Sum of all q_qjl values (precomputed once per query).
+    sum_all: f32,
+    qjl_scale: f32,
+}
+
+impl QjlQueryState {
+    fn new(q_qjl: &[f32], qjl_scale: f32) -> Self {
+        let sum_all: f32 = q_qjl.iter().sum();
+        QjlQueryState { sum_all, qjl_scale }
+    }
+}
+
+/// Compute the QJL dot-product correction for one neighbor.
+/// Uses the identity: dot(q, ±1) = 2 * masked_sum - sum_all
+#[inline]
+fn qjl_dot_correction(
+    q_qjl: &[f32],
+    signs: &[u8],
+    gamma: f32,
+    state: &QjlQueryState,
+    pd: usize,
+) -> f32 {
+    if gamma == 0.0 {
+        return 0.0;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    let masked_sum = unsafe { qjl_masked_sum_neon(q_qjl, signs, pd) };
+
+    #[cfg(not(target_arch = "aarch64"))]
+    let masked_sum = qjl_masked_sum_scalar(q_qjl, signs, pd);
+
+    let dot = 2.0 * masked_sum - state.sum_all;
+    gamma * state.qjl_scale * dot
+}
+
+/// Scalar masked sum: sum q_qjl[i] where sign bit i is 1.
+#[inline]
+fn qjl_masked_sum_scalar(q_qjl: &[f32], signs: &[u8], pd: usize) -> f32 {
+    let mut sum = 0.0f32;
+    for i in 0..pd {
+        if (signs[i / 8] >> (i % 8)) & 1 != 0 {
+            sum += q_qjl[i];
+        }
+    }
+    sum
+}
+
+/// NEON masked sum: process 4 floats per sign-byte bit group.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn qjl_masked_sum_neon(q_qjl: &[f32], signs: &[u8], pd: usize) -> f32 { unsafe {
+    use std::arch::aarch64::*;
+
+    let qptr = q_qjl.as_ptr();
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+    let mut byte_idx = 0usize;
+
+    // Process 8 floats (1 byte of signs) per iteration.
+    while i + 8 <= pd {
+        let byte = *signs.get_unchecked(byte_idx);
+
+        // Lower 4 bits → 4 floats.
+        let q0 = vld1q_f32(qptr.add(i));
+        // Create mask from bits 0-3: expand each bit to a full 32-bit lane.
+        let mask0 = vmvnq_u32(vsubq_u32(
+            vandq_u32(
+                vdupq_n_u32(byte as u32),
+                vld1q_u32([1u32, 2, 4, 8].as_ptr()),
+            ),
+            vdupq_n_u32(1),
+        ));
+        // Bit-select: keep q0 where mask is all-1s, else 0.
+        let selected0 = vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(q0), mask0));
+        acc0 = vaddq_f32(acc0, selected0);
+
+        // Upper 4 bits → next 4 floats.
+        let q1 = vld1q_f32(qptr.add(i + 4));
+        let mask1 = vmvnq_u32(vsubq_u32(
+            vandq_u32(
+                vdupq_n_u32((byte >> 4) as u32),
+                vld1q_u32([1u32, 2, 4, 8].as_ptr()),
+            ),
+            vdupq_n_u32(1),
+        ));
+        let selected1 = vreinterpretq_f32_u32(vandq_u32(vreinterpretq_u32_f32(q1), mask1));
+        acc1 = vaddq_f32(acc1, selected1);
+
+        i += 8;
+        byte_idx += 1;
+    }
+
+    acc0 = vaddq_f32(acc0, acc1);
+    let mut sum = vaddvq_f32(acc0);
+
+    // Scalar tail.
+    while i < pd {
+        if (signs[i / 8] >> (i % 8)) & 1 != 0 {
+            sum += *qptr.add(i);
+        }
+        i += 1;
+    }
+    sum
+}}
+
+/// Compute distance with QJL correction applied to the inner product.
+/// For NormalizedCosine: |1 - (dot_mse + qjl_correction)|
+/// For L2: uses the MSE distance directly (QJL correction is for inner product only).
+#[inline]
+fn distance_with_qjl_correction(
+    q_rot: &[f32],
+    dequant: &[f32],
+    qjl_corr: f32,
+    dt: DistanceType,
+) -> f32 {
+    match dt {
+        DistanceType::NormalizedCosineSimilarity | DistanceType::CosineSimilarity => {
+            // dot(q_rot, dequant) + qjl_correction
+            let mut dot = 0.0f32;
+            for i in 0..q_rot.len() {
+                dot += q_rot[i] * dequant[i];
+            }
+            (1.0 - (dot + qjl_corr)).abs()
+        }
+        _ => {
+            // For L2 and other metrics, use standard distance (QJL correction
+            // is designed for inner product / cosine).
+            primitive_comparator::compare(q_rot, dequant, dt)
+        }
+    }
+}
 
 pub struct TqIndex {
     pub graph: NeighborhoodGraph,
@@ -325,9 +519,17 @@ impl TqIndex {
         };
 
         let pd = self.tq_objects.quantizer.padded_dim();
+        let dim = self.tq_objects.dim;
         let dt = self.tq_objects.distance_type;
+        let qjl_scale = (std::f32::consts::FRAC_PI_2 as f32).sqrt() / (pd as f32);
+
         let mut q_rot = vec![0.0f32; pd];
         self.tq_objects.quantizer.rotation.forward(q, &mut q_rot);
+
+        let mut q_qjl = vec![0.0f32; pd];
+        self.tq_objects.quantizer.qjl_rotation.forward(&q_rot[..dim], &mut q_qjl);
+
+        let qjl_state = QjlQueryState::new(&q_qjl, qjl_scale);
 
         let mut dequant = vec![0.0f32; pd];
         let mut results = crate::common::ResultSet::with_capacity(k + 1);
@@ -340,7 +542,11 @@ impl TqIndex {
                 self.tq_objects.get_scales(oid),
                 &mut dequant,
             );
-            let d = primitive_comparator::compare(&q_rot, &dequant, dt);
+            let qjl_corr = qjl_dot_correction(
+                &q_qjl, self.tq_objects.get_qjl_signs(oid),
+                self.tq_objects.get_gamma(oid), &qjl_state, pd,
+            );
+            let d = distance_with_qjl_correction(&q_rot, &dequant, qjl_corr, dt);
             results.push(ObjectDistance::new(oid, d));
             if results.len() > k { results.pop(); }
         }
@@ -417,16 +623,22 @@ impl TqIndex {
         };
 
         let pd = self.tq_objects.quantizer.padded_dim();
+        let dim = self.tq_objects.dim;
         let dt = self.tq_objects.distance_type;
+        let qjl_scale = (std::f32::consts::FRAC_PI_2 as f32).sqrt() / (pd as f32);
 
-        // Rotate query ONCE.
+        // Rotate query ONCE via WHT1.
         let mut q_rot = vec![0.0f32; pd];
         self.tq_objects.quantizer.rotation.forward(query, &mut q_rot);
 
-        // Dequant buffer for distance computation.
+        // QJL: also rotate query via WHT2 (once per query).
+        let mut q_qjl = vec![0.0f32; pd];
+        self.tq_objects.quantizer.qjl_rotation.forward(&q_rot[..dim], &mut q_qjl);
+
+        let qjl_state = QjlQueryState::new(&q_qjl, qjl_scale);
         let mut dequant = vec![0.0f32; pd];
 
-        // Compute seed distances.
+        // Compute seed distances with QJL correction.
         for seed in seeds.iter_mut() {
             let sid: u32 = seed.id;
             if self.tq_objects.is_present(sid) {
@@ -435,7 +647,14 @@ impl TqIndex {
                     self.tq_objects.get_scales(sid),
                     &mut dequant,
                 );
-                seed.distance = primitive_comparator::compare(&q_rot, &dequant, dt);
+                // Apply QJL correction to dot product.
+                let qjl_corr = qjl_dot_correction(
+                    &q_qjl, self.tq_objects.get_qjl_signs(sid),
+                    self.tq_objects.get_gamma(sid), &qjl_state, pd,
+                );
+                seed.distance = distance_with_qjl_correction(
+                    &q_rot, &dequant, qjl_corr, dt,
+                );
             } else {
                 seed.distance = f32::MAX;
             }
@@ -475,13 +694,19 @@ impl TqIndex {
                 checked.insert(nid);
                 if !self.tq_objects.is_present(nid) { continue; }
 
-                // Dequantize in rotated domain + distance.
+                // Dequantize in rotated domain + QJL correction.
                 self.tq_objects.quantizer.dequantize_rotated(
                     self.tq_objects.get_codes(nid),
                     self.tq_objects.get_scales(nid),
                     &mut dequant,
                 );
-                let distance = primitive_comparator::compare(&q_rot, &dequant, dt);
+                let qjl_corr = qjl_dot_correction(
+                    &q_qjl, self.tq_objects.get_qjl_signs(nid),
+                    self.tq_objects.get_gamma(nid), &qjl_state, pd,
+                );
+                let distance = distance_with_qjl_correction(
+                    &q_rot, &dequant, qjl_corr, dt,
+                );
 
                 if distance <= exploration_radius {
                     let result = ObjectDistance::new(nid, distance);
