@@ -105,8 +105,6 @@ munind create -d 100 -D c -q 4 compressed_index data.tsv   # 4-bit, higher compr
 
 Search auto-detects native vs TQ from the saved index.
 
-See [findings.md](findings.md) for detailed benchmarks and implementation notes.
-
 ## Building
 
 ```bash
