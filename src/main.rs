@@ -345,7 +345,7 @@ fn cmd_search_tq(
     index_path: String,
     query_path: Option<String>,
 ) -> Result<(), String> {
-    let mut tq = munind::tq::TqIndex::load(&index_path).map_err(|e| e.to_string())?;
+    let tq = munind::tq::TqIndex::load(&index_path).map_err(|e| e.to_string())?;
     let dim = tq.property.dimension;
 
     let options = SearchOptions {
@@ -423,7 +423,7 @@ fn cmd_search_mmap(
     let index = MmapIndex::open(&index_path).map_err(|e| e.to_string())?;
     eprintln!("MmapIndex opened in {:.3}ms", start.elapsed().as_secs_f64() * 1000.0);
 
-    let dim = index.object_count(); // We need dim from property; use a workaround.
+    let _dim = index.object_count(); // We need dim from property; use a workaround.
     // Read dim from property file.
     let mut ps = munind::common::PropertySet::new();
     ps.load(&format!("{}/prf", index_path)).map_err(|e| e.to_string())?;

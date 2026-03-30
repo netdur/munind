@@ -9,7 +9,7 @@ use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::api::{Distance, Index, IndexConfig, SearchResult};
+use crate::api::{Distance, Index, IndexConfig};
 
 /// Opaque index handle for C callers.
 pub struct MunindIndex {

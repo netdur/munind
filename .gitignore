@@ -1,18 +1,16 @@
 /target
 Cargo.lock
 
-/vendors/ngt/
+/vendors/
 
-# macOS / editor noise
-.DS_Store
-.vscode/
+.*
 
-# Python cache
 __pycache__/
 *.pyc
 
-# Generated benchmark indexes
 /benches/indexes/
 
-# Local benchmark datasets
 /benches/data/
+
+*.md
+!README.md

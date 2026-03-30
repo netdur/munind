@@ -23,7 +23,6 @@ use crate::primitive_comparator::{self, DistanceType};
 use crate::tree::DVPTree;
 
 use self::quantizer::TqQuantizer;
-use self::rotation::BLOCK_SIZE;
 
 // ---------------------------------------------------------------------------
 // TqObjectSpace — quantized object storage
@@ -205,12 +204,7 @@ impl TqIndex {
         os.deserialize(&format!("{}/obj", index_dir))?;
 
         let quantizer = TqQuantizer::new(property.dimension, bits);
-        let mut tq_objects = TqObjectSpace::new(
-            TqQuantizer::new(property.dimension, bits),
-            dt,
-        );
-        // Rebuild with same rotation.
-        tq_objects = TqObjectSpace::new(quantizer, dt);
+        let mut tq_objects = TqObjectSpace::new(quantizer, dt);
 
         for id in 1..os.size() {
             let oid = id as ObjectID;

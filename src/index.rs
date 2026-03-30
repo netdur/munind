@@ -1,7 +1,3 @@
-/// Public-facing NGT Index — wraps ObjectSpace + DVPTree + NeighborhoodGraph
-/// with the API expected by tests/ngt_engine.rs.
-
-use std::io::Write;
 
 use rayon::prelude::*;
 

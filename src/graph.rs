@@ -46,6 +46,7 @@ impl BooleanVector {
 // Prefetch helper
 // ---------------------------------------------------------------------------
 
+/// Prefetch a single cache line (64 bytes) at `ptr`.
 #[inline]
 pub fn prefetch_read<T>(ptr: *const T) {
     #[cfg(target_arch = "x86_64")]
@@ -54,11 +55,17 @@ pub fn prefetch_read<T>(ptr: *const T) {
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        // prfm pldl1keep, [ptr]
         std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) ptr as *const u8, options(nostack, readonly));
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     { let _ = ptr; }
+}
+
+/// Prefetch object data. For flat contiguous storage the hardware prefetcher
+/// handles sequential cache lines well, so we just hint the first line.
+#[inline]
+pub fn prefetch_object(ptr: *const u8, _byte_size: usize) {
+    prefetch_read(ptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -731,24 +738,26 @@ impl NeighborhoodGraph {
 
             let neighbor_size = neighbors.len().min(edge_size);
 
-            // Prefetch first batch of neighbor objects.
+            let obj_bytes = os.dim * 4; // bytes per object
+
+            // Prefetch first batch — ALL cache lines of each object.
             let poft = prefetch_offset.min(neighbor_size);
             for i in 0..poft {
                 let nid: u32 = neighbors[i].id;
                 if !distance_checked.contains(nid) {
                     if let Ok(obj) = os.get_object(nid) {
-                        prefetch_read(obj.as_ptr());
+                        prefetch_object(obj.as_ptr() as *const u8, obj_bytes);
                     }
                 }
             }
 
             for ni in 0..neighbor_size {
-                // Sliding prefetch window.
+                // Sliding prefetch — full object.
                 if ni + prefetch_offset < neighbor_size {
                     let ahead_id: u32 = neighbors[ni + prefetch_offset].id;
                     if !distance_checked.contains(ahead_id) {
                         if let Ok(obj) = os.get_object(ahead_id) {
-                            prefetch_read(obj.as_ptr());
+                            prefetch_object(obj.as_ptr() as *const u8, obj_bytes);
                         }
                     }
                 }
@@ -865,12 +874,13 @@ impl NeighborhoodGraph {
             if neighbors.is_empty() { continue; }
             let neighbor_size = neighbors.len().min(edge_size);
 
+            let obj_bytes_mmap = os.dim() * 4;
             let poft = prefetch_offset.min(neighbor_size);
             for i in 0..poft {
                 let nid: u32 = neighbors[i].id;
                 if !distance_checked.contains(nid) {
                     if let Ok(obj) = os.get_object(nid) {
-                        prefetch_read(obj.as_ptr());
+                        prefetch_object(obj.as_ptr() as *const u8, obj_bytes_mmap);
                     }
                 }
             }
@@ -879,7 +889,7 @@ impl NeighborhoodGraph {
                     let ahead_id: u32 = neighbors[ni + prefetch_offset].id;
                     if !distance_checked.contains(ahead_id) {
                         if let Ok(obj) = os.get_object(ahead_id) {
-                            prefetch_read(obj.as_ptr());
+                            prefetch_object(obj.as_ptr() as *const u8, obj_bytes_mmap);
                         }
                     }
                 }

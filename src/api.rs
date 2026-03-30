@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use crate::error::{Error, Result};
 use crate::common::ObjectDistance;
 use crate::index::{
-    self as inner, Index as InnerIndex, IndexProperty, IndexDistanceType,
+    Index as InnerIndex, IndexProperty, IndexDistanceType,
 };
 
 // ---------------------------------------------------------------------------
