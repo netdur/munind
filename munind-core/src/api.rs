@@ -168,7 +168,7 @@ impl Index {
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<SearchResult>> {
         let opts = crate::common::SearchOptions {
             k,
-            epsilon: 0.1,
+            epsilon: 0.2,
             edge_size: None,
         };
         let results = self.inner.search(query, &opts)?;

@@ -1,21 +1,25 @@
 # munind
 
-Fast approximate nearest neighbor search as a SQLite extension.
+Fast approximate nearest neighbor search in Rust. Use it as a library, a C FFI, a CLI tool, or a SQLite extension.
+
+Graph+tree ANN engine (ANNG + DVPTree) with NEON SIMD on Apple Silicon.
 
 ```sql
+-- as a SQLite extension
 .load ./libmunind
-
 CREATE VIRTUAL TABLE movies USING munind(dim=384, metric=cosine);
-
 INSERT INTO movies(rowid, vector) VALUES (1, ?embedding);
-
 SELECT rowid, distance FROM movies
 WHERE vector MATCH ?query AND k = 10 AND epsilon = 0.2;
 ```
 
-munind gives you vector similarity search inside SQLite — no external server, no extra process. Combine it with regular SQL tables for metadata filtering, JSON queries, full-text search (FTS5), or joins.
-
-Built on a graph+tree ANN algorithm (ANNG + DVPTree) ported from [Yahoo NGT](https://github.com/yahoojapan/NGT), with NEON SIMD on Apple Silicon.
+```rust
+// as a Rust library
+let mut index = Index::create(IndexConfig::new(384, Distance::Cosine)).unwrap();
+index.insert(&embedding).unwrap();
+index.build().unwrap();
+let results = index.search(&query, 10).unwrap();
+```
 
 ## Install
 
@@ -63,7 +67,7 @@ SELECT rowid, distance FROM embeddings
 WHERE vector MATCH ?query_blob AND k = 10 AND epsilon = 0.4;
 ```
 
-Higher epsilon = better recall, slower search. Default is 0.1.
+Higher epsilon = better recall, slower search. Default is 0.2.
 
 ### Join with metadata
 
@@ -118,17 +122,30 @@ mydb.db-munind-embeddings/
 
 ## Benchmarks
 
-GloVe-100-angular, 1.18M vectors, dim=100, cosine metric, Apple M-series:
+GloVe-100-angular, 1.18M vectors, dim=100, cosine metric, Apple M-series.
 
-### Throughput
+### The epsilon tradeoff
 
-| Phase | Time | Rate |
-|-------|------|------|
-| Insert 1.18M vectors | 0.2s | 5M vec/s |
-| Build graph | 55s | 21K vec/s |
-| Save to disk | 0.3s | |
+`epsilon` controls how aggressively the graph search explores. Higher epsilon = more nodes visited = better recall but slower. Pick the right one for your use case:
 
-### Search latency (single-thread, warm cache)
+| epsilon | recall@10 | p50 latency | qps (1 thread) | Use case |
+|---------|-----------|-------------|-----------------|----------|
+| 0.1 | 63.5% | 137 us | 6,326 | Real-time serving, speed-critical |
+| **0.2 (default)** | **84.7%** | **392 us** | **1,743** | **Good balance for most applications** |
+| 0.4 | 98.7% | 3.5 ms | 104 | High-recall, accuracy-critical |
+
+```sql
+-- default (epsilon=0.2, good balance)
+SELECT rowid, distance FROM vecs WHERE vector MATCH ?q AND k = 10;
+
+-- fast, lower recall
+SELECT rowid, distance FROM vecs WHERE vector MATCH ?q AND k = 10 AND epsilon = 0.1;
+
+-- thorough, near-exact
+SELECT rowid, distance FROM vecs WHERE vector MATCH ?q AND k = 10 AND epsilon = 0.4;
+```
+
+### Full latency distribution (single-thread, warm cache)
 
 | epsilon | recall@10 | avg | p50 | p95 | p99 | qps |
 |---------|-----------|-----|-----|-----|-----|-----|
@@ -136,7 +153,7 @@ GloVe-100-angular, 1.18M vectors, dim=100, cosine metric, Apple M-series:
 | 0.2 | 0.847 | 574 us | 392 us | 1.6 ms | 2.3 ms | 1,743 |
 | 0.4 | 0.987 | 9.6 ms | 3.5 ms | 37 ms | 50 ms | 104 |
 
-### Multi-thread (10 threads, warm cache)
+### Multi-thread (10 threads)
 
 | epsilon | recall@10 | qps |
 |---------|-----------|-----|
@@ -144,20 +161,22 @@ GloVe-100-angular, 1.18M vectors, dim=100, cosine metric, Apple M-series:
 | 0.2 | 0.847 | 11,907 |
 | 0.4 | 0.987 | 733 |
 
-### Cold cache (reopen from disk)
+### Build
 
-| | Time |
-|---|---|
-| Index open | 250 ms |
-| Query latency | Same as warm cache |
+| Phase | Time | Rate |
+|-------|------|------|
+| Insert 1.18M vectors | 0.2s | 5M vec/s |
+| Build graph | 55s | 21K vec/s |
+| Save to disk | 0.3s | |
+| Open from disk (cold) | 250 ms | |
 
-### Memory
+### Memory / disk
 
-| File | Size |
-|------|------|
-| Vectors (obj) | 452.6 MB |
-| Graph (grp) | 155.5 MB |
-| Tree (tre) | 23.3 MB |
+| Component | Size |
+|-----------|------|
+| Vectors | 452.6 MB |
+| Graph | 155.5 MB |
+| Tree | 23.3 MB |
 | **Total** | **631 MB** |
 
 ## Rust API

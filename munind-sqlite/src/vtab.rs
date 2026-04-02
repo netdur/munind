@@ -524,7 +524,7 @@ unsafe impl VTabCursor for MunindCursor {
 
                 let mut query_vec: Option<Vec<f32>> = None;
                 let mut k: usize = 10;
-                let mut epsilon: f32 = 0.1;
+                let mut epsilon: f32 = 0.2;
 
                 let arg_values: Vec<ValueRef<'_>> = args.iter().collect();
 
