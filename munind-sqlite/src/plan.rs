@@ -8,5 +8,6 @@ pub const PLAN_KNN: i32 = 3;
 pub const ARG_MATCH_VECTOR: u8 = b'V';
 pub const ARG_K_VALUE: u8 = b'K';
 pub const ARG_LIMIT: u8 = b'L';
+pub const ARG_EPSILON: u8 = b'E';
 #[allow(dead_code)]
 pub const ARG_ROWID_EQ: u8 = b'R';

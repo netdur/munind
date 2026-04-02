@@ -1,26 +1,171 @@
 # munind
 
-Fast approximate nearest neighbor search library in Rust.
+Fast approximate nearest neighbor search as a SQLite extension.
 
-Ported from [NGT](https://github.com/yahoojapan/NGT) (Yahoo Japan) with NEON SIMD, flat contiguous storage, and optional TurboQuant compression.
+```sql
+.load ./libmunind
 
-## Features
+CREATE VIRTUAL TABLE movies USING munind(dim=384, metric=cosine);
 
-- Graph-based ANN search (DVPTree + ANNG)
-- NEON SIMD distance functions on Apple Silicon / ARM
-- Flat contiguous object storage for cache-friendly access
-- TurboQuant quantization (3/4/8-bit, data-oblivious, no training)
-- Memory-mapped index loading (memmap2)
-- Parallel index building (rayon)
-- C FFI (`libmunind.dylib` / `.so`)
-- CLI tool
+INSERT INTO movies(rowid, vector) VALUES (1, ?embedding);
 
-## Quick Start
+SELECT rowid, distance FROM movies
+WHERE vector MATCH ?query AND k = 10 AND epsilon = 0.2;
+```
 
-### Rust
+munind gives you vector similarity search inside SQLite — no external server, no extra process. Combine it with regular SQL tables for metadata filtering, JSON queries, full-text search (FTS5), or joins.
+
+Built on a graph+tree ANN algorithm (ANNG + DVPTree) ported from [Yahoo NGT](https://github.com/yahoojapan/NGT), with NEON SIMD on Apple Silicon.
+
+## Install
+
+```bash
+cargo build --release -p munind-sqlite
+# produces: target/release/libmunind.dylib (macOS) or libmunind.so (Linux)
+```
+
+Load in any SQLite client:
+
+```sql
+.load ./target/release/libmunind
+```
+
+## Usage
+
+### Create a vector table
+
+```sql
+CREATE VIRTUAL TABLE embeddings USING munind(dim=384, metric=cosine);
+```
+
+Supported metrics: `l2`, `cosine`, `l1`, `ip` (inner product), `angle`.
+
+### Insert vectors
+
+```sql
+INSERT INTO embeddings(rowid, vector)
+VALUES (1, munind_vector('[0.1, 0.2, 0.3, ...]'));
+```
+
+Vectors can be passed as:
+- Raw BLOBs (little-endian f32 array) — fastest
+- JSON text arrays via `munind_vector()` — convenient
+
+### Search
+
+```sql
+-- basic KNN search
+SELECT rowid, distance FROM embeddings
+WHERE vector MATCH ?query_blob AND k = 10;
+
+-- tune recall/speed tradeoff with epsilon
+SELECT rowid, distance FROM embeddings
+WHERE vector MATCH ?query_blob AND k = 10 AND epsilon = 0.4;
+```
+
+Higher epsilon = better recall, slower search. Default is 0.1.
+
+### Join with metadata
+
+The vector table handles vectors. Metadata lives in regular SQLite tables — use the full power of SQL:
+
+```sql
+CREATE TABLE photo_meta (
+    id INTEGER PRIMARY KEY,
+    date TEXT,
+    location TEXT,
+    tags TEXT
+);
+
+-- similar photos in June from Morocco
+SELECT v.rowid, v.distance, m.location
+FROM embeddings v
+JOIN photo_meta m ON m.id = v.rowid
+WHERE v.vector MATCH ?query AND v.k = 20 AND v.epsilon = 0.2
+  AND m.date BETWEEN '2025-06-01' AND '2025-06-30'
+  AND m.location IN ('fes', 'rabat', 'marrakech')
+LIMIT 10;
+```
+
+### Helper functions
+
+```sql
+SELECT munind_vector('[1.0, 2.0, 3.0]');              -- JSON array -> BLOB
+SELECT munind_vector_json(vector_blob);                -- BLOB -> JSON array
+SELECT munind_distance(blob1, blob2, 'cosine');        -- compute distance
+SELECT munind_version();                               -- extension version
+```
+
+### Delete
+
+```sql
+DELETE FROM embeddings WHERE rowid = 42;
+```
+
+### Persistence
+
+The index saves automatically when the connection closes. Files are stored adjacent to the database:
+
+```
+mydb.db
+mydb.db-munind-embeddings/
+    prf    # properties
+    obj    # vectors
+    grp    # graph
+    tre    # tree
+    rowmap # rowid mapping
+```
+
+## Benchmarks
+
+GloVe-100-angular, 1.18M vectors, dim=100, cosine metric, Apple M-series:
+
+### Throughput
+
+| Phase | Time | Rate |
+|-------|------|------|
+| Insert 1.18M vectors | 0.2s | 5M vec/s |
+| Build graph | 55s | 21K vec/s |
+| Save to disk | 0.3s | |
+
+### Search latency (single-thread, warm cache)
+
+| epsilon | recall@10 | avg | p50 | p95 | p99 | qps |
+|---------|-----------|-----|-----|-----|-----|-----|
+| 0.1 | 0.635 | 158 us | 137 us | 325 us | 454 us | 6,326 |
+| 0.2 | 0.847 | 574 us | 392 us | 1.6 ms | 2.3 ms | 1,743 |
+| 0.4 | 0.987 | 9.6 ms | 3.5 ms | 37 ms | 50 ms | 104 |
+
+### Multi-thread (10 threads, warm cache)
+
+| epsilon | recall@10 | qps |
+|---------|-----------|-----|
+| 0.1 | 0.635 | 39,493 |
+| 0.2 | 0.847 | 11,907 |
+| 0.4 | 0.987 | 733 |
+
+### Cold cache (reopen from disk)
+
+| | Time |
+|---|---|
+| Index open | 250 ms |
+| Query latency | Same as warm cache |
+
+### Memory
+
+| File | Size |
+|------|------|
+| Vectors (obj) | 452.6 MB |
+| Graph (grp) | 155.5 MB |
+| Tree (tre) | 23.3 MB |
+| **Total** | **631 MB** |
+
+## Rust API
+
+munind-core can be used directly as a Rust library:
 
 ```rust
-use munind::api::{Index, IndexConfig, Distance};
+use munind_core::api::{Index, IndexConfig, Distance};
 
 let config = IndexConfig::new(128, Distance::Cosine);
 let mut index = Index::create(config).unwrap();
@@ -35,23 +180,22 @@ println!("nearest: id={}, distance={}", results[0].id, results[0].distance);
 index.save("my_index").unwrap();
 ```
 
-### CLI
+## CLI
 
 ```bash
-# Build
-cargo build --release
+cargo build --release -p munind-core
 
-# Create index from TSV data
-munind create -d 100 -D c index_dir data.tsv
+# create index from TSV data
+munind-core create -d 100 -D c index_dir data.tsv
 
-# Search
-munind search -n 10 -e 0.1 index_dir queries.tsv
+# search
+munind-core search -n 10 -e 0.1 index_dir queries.tsv
 
-# Create with TurboQuant compression (8-bit)
-munind create -d 100 -D c -q 8 index_dir data.tsv
+# memory-mapped search (zero-copy vectors)
+munind-core search-mmap -n 10 -e 0.1 index_dir queries.tsv
 ```
 
-### C FFI
+## C FFI
 
 ```c
 #include "munind.h"
@@ -69,55 +213,23 @@ munind_save(idx, "my_index");
 munind_free(idx);
 ```
 
-## Performance
+## Project structure
 
-glove-100-angular (1.18M vectors, dim=100, cosine):
-
-| | C++ NGT | munind | munind TQ-8 |
-|---|---|---|---|
-| Build | 1:49 | 0:57 | 0:55 + 0.8s |
-| Objects | 453 MB | 453 MB | 164 MB |
-| Search (ms) | 0.272 | 0.158 | 0.254 |
-| Recall@10 | 0.628 | 0.635 | 0.625 |
-
-## Distance Functions
-
-`-D` flag or `Distance` enum:
-
-| Flag | Distance | Notes |
-|---|---|---|
-| `2` | L2 (Euclidean) | Default |
-| `c` | Cosine | Pre-normalizes on insert |
-| `1` | L1 (Manhattan) | |
-| `i` | Inner Product | |
-| `a` | Angle | |
-| `A` | Normalized Angle | |
-| `E` | Normalized L2 | |
-
-## TurboQuant
-
-Optional lossy compression using the TurboQuant algorithm (arXiv 2504.19874). Data-oblivious: works on any dataset without training.
-
-```bash
-munind create -d 100 -D c -q 8 compressed_index data.tsv   # 8-bit, ~2.8x compression
-munind create -d 100 -D c -q 4 compressed_index data.tsv   # 4-bit, higher compression, lower recall
+```
+munind/
+  munind-core/    # ANN library (Rust)
+  munind-sqlite/  # SQLite loadable extension
 ```
 
-Search auto-detects native vs TQ from the saved index.
+## Distance metrics
 
-## Building
-
-```bash
-cargo build --release          # library + CLI
-cargo test                     # run tests
-```
-
-Produces:
-- `target/release/munind` (CLI binary)
-- `target/release/libmunind.dylib` (macOS) or `libmunind.so` (Linux)
-- `target/release/libmunind.rlib` (Rust library)
-
-C header: `include/munind.h`
+| SQL name | Description |
+|----------|-------------|
+| `cosine` | Cosine similarity (pre-normalizes on insert) |
+| `l2` | Euclidean distance (default) |
+| `l1` | Manhattan distance |
+| `ip` | Inner product |
+| `angle` | Angular distance |
 
 ## License
 

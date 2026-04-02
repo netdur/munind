@@ -25,7 +25,8 @@ const SCHEMA: &str = "\
     CREATE TABLE x(\
         vector BLOB,\
         distance REAL HIDDEN,\
-        k INTEGER HIDDEN\
+        k INTEGER HIDDEN,\
+        epsilon REAL HIDDEN\
     )";
 
 // ---------------------------------------------------------------------------
@@ -253,6 +254,7 @@ unsafe impl<'vtab> VTab<'vtab> for MunindVTab {
         let mut match_idx: Option<usize> = None;
         let mut k_idx: Option<usize> = None;
         let mut limit_idx: Option<usize> = None;
+        let mut epsilon_idx: Option<usize> = None;
 
         for (i, constraint) in info.constraints().enumerate() {
             if !constraint.is_usable() {
@@ -264,6 +266,9 @@ unsafe impl<'vtab> VTab<'vtab> for MunindVTab {
                 }
                 (2, IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ) => {
                     k_idx = Some(i);
+                }
+                (3, IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_EQ) => {
+                    epsilon_idx = Some(i);
                 }
                 (_, IndexConstraintOp::SQLITE_INDEX_CONSTRAINT_LIMIT) => {
                     limit_idx = Some(i);
@@ -280,6 +285,7 @@ unsafe impl<'vtab> VTab<'vtab> for MunindVTab {
 
                 let mut match_set = false;
                 let mut k_set = false;
+                let mut eps_set = false;
 
                 for (i, (constraint, mut usage)) in
                     info.constraints_and_usages().enumerate()
@@ -305,6 +311,13 @@ unsafe impl<'vtab> VTab<'vtab> for MunindVTab {
                         idx_str.push(ch as char);
                         argv_index += 1;
                         k_set = true;
+                    }
+                    if epsilon_idx == Some(i) && !eps_set {
+                        usage.set_argv_index(argv_index);
+                        usage.set_omit(true);
+                        idx_str.push(ARG_EPSILON as char);
+                        argv_index += 1;
+                        eps_set = true;
                     }
                 }
 
@@ -511,6 +524,7 @@ unsafe impl VTabCursor for MunindCursor {
 
                 let mut query_vec: Option<Vec<f32>> = None;
                 let mut k: usize = 10;
+                let mut epsilon: f32 = 0.1;
 
                 let arg_values: Vec<ValueRef<'_>> = args.iter().collect();
 
@@ -533,6 +547,17 @@ unsafe impl VTabCursor for MunindCursor {
                                 }
                             };
                         }
+                        ARG_EPSILON => {
+                            epsilon = match arg_values[i] {
+                                ValueRef::Real(v) => v as f32,
+                                ValueRef::Integer(v) => v as f32,
+                                _ => {
+                                    return Err(Error::ModuleError(
+                                        "munind: epsilon must be a number".into(),
+                                    ))
+                                }
+                            };
+                        }
                         _ => {}
                     }
                 }
@@ -550,7 +575,7 @@ unsafe impl VTabCursor for MunindCursor {
                 }
 
                 // Execute search
-                let raw_results = vtab.index.search(&query, k).map_err(|e| {
+                let raw_results = vtab.index.search_with(&query, k, epsilon, None).map_err(|e| {
                     Error::ModuleError(format!("munind: search failed: {}", e))
                 })?;
 
