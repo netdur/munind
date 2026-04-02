@@ -1,0 +1,15 @@
+BatchSizeForCreation	200
+Dimension	2
+DistanceType	6
+EdgeSizeForCreation	3
+EdgeSizeForSearch	3
+EpsilonForCreation	0.100000024
+GraphType	ANNG
+IncomingEdge	80
+IncrimentalEdgeSizeLimitForTruncation	50
+IndexType	GraphAndTree
+InternalChildrenSize	5
+LeafNodeSize	100
+ObjectType	Float
+OutgoingEdge	10
+SeedSize	10
